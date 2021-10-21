@@ -1,6 +1,7 @@
 <!doctype html>
 <html lang="en">
 <head>
+  <%= NewRelic::Agent.browser_timing_header rescue "" %>
   <meta charset="utf-8">
   <title><%= page_title %></title>
 
@@ -16,6 +17,8 @@
   <% if CurrentUser.user.blacklisted_tags.present? %>
     <meta name="blacklisted-tags" content="<%= CurrentUser.user.blacklisted_tags.gsub(/(?:\r|\n)+/, ",") %>">
   <% end %>
+
+  <%= tag.meta name: "autocomplete-tag-prefixes", content: AutocompleteService::TAG_PREFIXES.to_json %>
 
   <%# XXX hack to only load Ruffle on Flash posts %>
   <% if controller_name == "posts" && action_name == "show" && @post&.is_flash? %>

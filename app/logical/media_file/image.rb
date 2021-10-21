@@ -3,23 +3,12 @@
 # @see https://github.com/libvips/ruby-vips
 # @see https://libvips.github.io/libvips/API/current
 class MediaFile::Image < MediaFile
-  # Taken from ArgyllCMS 2.0.0 (see also: https://ninedegreesbelow.com/photography/srgb-profile-comparison.html)
-  SRGB_PROFILE = "#{Rails.root}/config/sRGB.icm"
-
   # http://jcupitt.github.io/libvips/API/current/VipsForeignSave.html#vips-jpegsave
   JPEG_OPTIONS = { Q: 90, background: 255, strip: true, interlace: true, optimize_coding: true }
 
   # http://jcupitt.github.io/libvips/API/current/libvips-resample.html#vips-thumbnail
-  if Vips.at_least_libvips?(8, 10)
-    THUMBNAIL_OPTIONS = { size: :down, linear: false, no_rotate: true }
-    CROP_OPTIONS = { crop: :attention, linear: false, no_rotate: true }
-  elsif Vips.at_least_libvips?(8, 8)
-    THUMBNAIL_OPTIONS = { size: :down, linear: false, no_rotate: true, export_profile: "srgb" }
-    CROP_OPTIONS = { crop: :attention, linear: false, no_rotate: true, export_profile: "srgb" }
-  else
-    THUMBNAIL_OPTIONS = { size: :down, linear: false, auto_rotate: false, export_profile: SRGB_PROFILE, import_profile: SRGB_PROFILE }
-    CROP_OPTIONS = { crop: :attention, linear: false, auto_rotate: false, export_profile: SRGB_PROFILE, import_profile: SRGB_PROFILE }
-  end
+  THUMBNAIL_OPTIONS = { size: :down, linear: false }
+  CROP_OPTIONS = { crop: :attention, linear: false }
 
   def dimensions
     image.size
@@ -34,8 +23,24 @@ class MediaFile::Image < MediaFile
     true
   end
 
-  def is_animated?
-    is_animated_gif? || is_animated_png?
+  def duration
+    return nil if !is_animated?
+    video.duration
+  end
+
+  def frame_count
+    if file_ext == :gif
+      image.get("n-pages")
+    elsif file_ext == :png
+      metadata.fetch("PNG:AnimationFrames", 1)
+    else
+      nil
+    end
+  end
+
+  def frame_rate
+    return nil if !is_animated? || frame_count.nil? || duration.nil? || duration == 0
+    frame_count / duration
   end
 
   def channels
@@ -72,21 +77,26 @@ class MediaFile::Image < MediaFile
     end
   end
 
+  def is_animated?
+    frame_count.to_i > 1
+  end
+
   def is_animated_gif?
-    file_ext == :gif && image.get("n-pages") > 1
-  # older versions of libvips that don't support n-pages will raise an error
-  rescue Vips::Error
-    false
+    file_ext == :gif && is_animated?
   end
 
   def is_animated_png?
-    file_ext == :png && APNGInspector.new(file.path).inspect!.animated?
+    file_ext == :png && is_animated?
   end
 
   # @return [Vips::Image] the Vips image object for the file
   def image
-    Vips::Image.new_from_file(file.path, fail: true)
+    Vips::Image.new_from_file(file.path, fail: true).autorot
   end
 
-  memoize :image, :dimensions, :is_corrupt?, :is_animated_gif?, :is_animated_png?
+  def video
+    FFmpeg.new(file)
+  end
+
+  memoize :image, :video, :dimensions, :is_corrupt?, :is_animated_gif?, :is_animated_png?
 end

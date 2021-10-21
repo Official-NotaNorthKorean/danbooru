@@ -74,7 +74,7 @@ class Tag < ApplicationRecord
 
       # fix tags where the post count is non-zero but the tag isn't present on any posts.
       def regenerate_nonexistent_post_counts!
-        Tag.find_by_sql(<<~SQL)
+        Tag.find_by_sql(<<~SQL.squish)
           UPDATE tags
           SET post_count = 0
           WHERE
@@ -90,7 +90,7 @@ class Tag < ApplicationRecord
 
       # fix tags where the stored post count doesn't match the true post count.
       def regenerate_incorrect_post_counts!
-        Tag.find_by_sql(<<~SQL)
+        Tag.find_by_sql(<<~SQL.squish)
           UPDATE tags
           SET post_count = true_count
           FROM (
@@ -223,7 +223,7 @@ class Tag < ApplicationRecord
 
   module SearchMethods
     def autocorrect_matches(name)
-      tags = fuzzy_name_matches(name).order_similarity(name)
+      fuzzy_name_matches(name).order_similarity(name)
     end
 
     # ref: https://www.postgresql.org/docs/current/static/pgtrgm.html#idm46428634524336
@@ -287,6 +287,12 @@ class Tag < ApplicationRecord
         q = q.name_or_alias_matches(params[:name_or_alias_matches])
       end
 
+      if params[:is_empty].to_s.truthy?
+        q = q.empty
+      elsif params[:is_empty].to_s.falsy?
+        q = q.nonempty
+      end
+
       if params[:hide_empty].to_s.truthy?
         q = q.nonempty
       end
@@ -346,6 +352,7 @@ class Tag < ApplicationRecord
     tags += names.grep(/\A(.+)_\(cosplay\)\z/i) { "char:#{TagAlias.to_aliased([$1]).first}" }
     tags << "cosplay" if names.any?(/_\(cosplay\)\z/i)
     tags << "school_uniform" if names.any?(/_school_uniform\z/i)
+    tags << "meme" if names.any?(/_\(meme\)\z/i)
     tags.uniq
   end
 

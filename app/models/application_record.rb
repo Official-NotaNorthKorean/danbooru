@@ -14,19 +14,29 @@ class ApplicationRecord < ActiveRecord::Base
         extending(PaginationExtension).paginate(*args, **options)
       end
 
-      def paginated_search(params, count_pages: params[:search].present?, **defaults)
+      # Perform a search using the model's `search` method, then paginate the results.
+      #
+      # @param params [Hash] The URL request params from the user
+      # @param page [Integer] The page number
+      # @param limit [Integer] The number of posts per page
+      # @param count_pages [Boolean] If true, calculate the exact number of pages of
+      #   results. If false (the default), don't calculate the exact number of pages
+      #   of results; assume there are too many pages to count.
+      # @param count [Integer] the precalculated number of search results, or nil to calculate it
+      # @param defaults [Hash] The default params for the search
+      def paginated_search(params, page: params[:page], limit: params[:limit], count_pages: params[:search].present?, count: nil, defaults: {})
         search_params = params.fetch(:search, {}).permit!
         search_params = defaults.merge(search_params).with_indifferent_access
 
         max_limit = (params[:format] == "sitemap") ? 10_000 : 1_000
-        search(search_params).paginate(params[:page], limit: params[:limit], max_limit: max_limit, search_count: count_pages)
+        search(search_params).paginate(page, limit: limit, max_limit: max_limit, count: count, search_count: count_pages)
       end
     end
   end
 
   concerning :PrivilegeMethods do
     class_methods do
-      def visible(user)
+      def visible(_user)
         all
       end
 
@@ -47,14 +57,14 @@ class ApplicationRecord < ActiveRecord::Base
       end
 
       def multiple_includes
-        reflections.reject { |k,v| v.macro != :has_many }.keys.map(&:to_sym)
+        reflections.select { |_, v| v.macro == :has_many }.keys.map(&:to_sym)
       end
 
       def associated_models(name)
         if reflections[name].options[:polymorphic]
-          associated_models = reflections[name].active_record.try(:model_types) || []
+          reflections[name].active_record.try(:model_types) || []
         else
-          associated_models = [reflections[name].class_name]
+          [reflections[name].class_name]
         end
       end
     end
@@ -77,7 +87,7 @@ class ApplicationRecord < ActiveRecord::Base
 
     def serializable_hash(options = {})
       options ||= {}
-      if options[:only] && options[:only].is_a?(String)
+      if options[:only].is_a?(String)
         options.delete(:methods)
         options.delete(:include)
         options.merge!(ParameterBuilder.serial_parameters(options[:only], self))
@@ -116,24 +126,47 @@ class ApplicationRecord < ActiveRecord::Base
   concerning :ActiveRecordExtensions do
     class_methods do
       def without_timeout
-        connection.execute("SET STATEMENT_TIMEOUT = 0") unless Rails.env == "test"
+        connection.execute("SET STATEMENT_TIMEOUT = 0") unless Rails.env.test?
         yield
       ensure
-        connection.execute("SET STATEMENT_TIMEOUT = #{CurrentUser.user.try(:statement_timeout) || 3_000}") unless Rails.env == "test"
+        connection.execute("SET STATEMENT_TIMEOUT = #{CurrentUser.user.try(:statement_timeout) || 3_000}") unless Rails.env.test?
       end
 
       def with_timeout(n, default_value = nil, new_relic_params = {})
-        connection.execute("SET STATEMENT_TIMEOUT = #{n}") unless Rails.env == "test"
+        connection.execute("SET STATEMENT_TIMEOUT = #{n}") unless Rails.env.test?
         yield
-      rescue ::ActiveRecord::StatementInvalid => x
-        DanbooruLogger.log(x, expected: false, **new_relic_params)
-        return default_value
+      rescue ::ActiveRecord::StatementInvalid => e
+        DanbooruLogger.log(e, expected: true, **new_relic_params)
+        default_value
       ensure
-        connection.execute("SET STATEMENT_TIMEOUT = #{CurrentUser.user.try(:statement_timeout) || 3_000}") unless Rails.env == "test"
+        connection.execute("SET STATEMENT_TIMEOUT = #{CurrentUser.user.try(:statement_timeout) || 3_000}") unless Rails.env.test?
       end
 
       def update!(*args)
         all.each { |record| record.update!(*args) }
+      end
+
+      def each_duplicate(*columns)
+        return enum_for(:each_duplicate, *columns) unless block_given?
+
+        group(columns).having("count(*) > 1").count.each do |values, count|
+          hash = columns.zip(Array.wrap(values)).to_h
+          yield count: count, **hash
+        end
+      end
+
+      def destroy_duplicates!(*columns, log: true)
+        each_duplicate(*columns) do |count:, **columns_with_values|
+          records = where(columns_with_values).order(:id)
+          dupes = records.drop(1)
+
+          if log
+            data = { keep: records.first.id, destroy: dupes.map(&:id), count: count, **columns_with_values }
+            DanbooruLogger.info("Destroying duplicate #{self.name} #{dupes.map(&:id).join(", ")}", data)
+          end
+
+          dupes.each(&:destroy!)
+        end
       end
     end
   end
@@ -161,14 +194,17 @@ class ApplicationRecord < ActiveRecord::Base
   end
 
   concerning :DtextMethods do
-    def dtext_shortlink(**options)
+    def dtext_shortlink(**_options)
       "#{self.class.name.underscore.tr("_", " ")} ##{id}"
     end
   end
 
   concerning :ConcurrencyMethods do
     class_methods do
-      def parallel_each(batch_size: 1000, in_processes: 4, in_threads: nil)
+      def parallel_each(batch_size: 1000, in_processes: 4, in_threads: nil, &block)
+        # XXX We may deadlock if a transaction is open; do a non-parallel each.
+        return find_each(&block) if connection.transaction_open?
+
         # XXX Use threads in testing because processes can't see each other's
         # database transactions.
         if Rails.env.test?

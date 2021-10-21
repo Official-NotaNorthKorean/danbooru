@@ -2,6 +2,10 @@ require 'test_helper'
 
 module Sources
   class PixivTest < ActiveSupport::TestCase
+    setup do
+      skip "Pixiv credentials not configured" unless Sources::Strategies::Pixiv.enabled?
+    end
+
     def assert_illust_id(illust_id, url)
       site = Sources::Strategies.find(url)
       assert_equal(illust_id, site.illust_id)
@@ -44,10 +48,10 @@ module Sources
         end
 
         should "capture the frame data" do
-          ugoira_frame_data = @site.data[:ugoira_frame_data]
+          media_file = @site.download_file!
 
-          assert_equal(2, ugoira_frame_data.size)
-          assert_equal([{"file" => "000000.jpg", "delay" => 125}, {"file" => "000001.jpg", "delay" => 125}], ugoira_frame_data)
+          assert_equal(2, media_file.frame_data.size)
+          assert_equal([{"file" => "000000.jpg", "delay" => 125}, {"file" => "000001.jpg", "delay" => 125}], media_file.frame_data)
         end
       end
 

@@ -54,6 +54,8 @@ module Downloads
         end
 
         should "download the full size image instead of the HTML page" do
+          skip "Pixiv credentials not configured" unless Sources::Strategies::Pixiv.enabled?
+
           assert_rewritten(@p0_full_size_image, @medium_page)
           assert_rewritten(@p0_full_size_image, @manga_page)
           assert_rewritten(@p1_full_size_image, @manga_big_p1_page)
@@ -63,6 +65,8 @@ module Downloads
         end
 
         should "download the full size image instead of the thumbnail" do
+          skip "Pixiv credentials not configured" unless Sources::Strategies::Pixiv.enabled?
+
           assert_rewritten(@p0_full_size_image, @p0_large_thumbnail)
           assert_rewritten(@p1_full_size_image, @p1_large_thumbnail)
           assert_downloaded(@p0_file_size, @p0_large_thumbnail)
@@ -127,9 +131,10 @@ module Downloads
     context "An ugoira site for pixiv" do
       should "capture the data" do
         @strategy = Sources::Strategies.find("http://www.pixiv.net/member_illust.php?mode=medium&illust_id=62247364")
+        media_file = @strategy.download_file!
 
-        assert_equal(2, @strategy.data[:ugoira_frame_data].size)
-        assert_equal([{"file" => "000000.jpg", "delay" => 125}, {"file" => "000001.jpg", "delay" => 125}], @strategy.data[:ugoira_frame_data])
+        assert_equal(2, media_file.frame_data.size)
+        assert_equal([{"file" => "000000.jpg", "delay" => 125}, {"file" => "000001.jpg", "delay" => 125}], media_file.frame_data)
       end
     end
   end

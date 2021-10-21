@@ -1,6 +1,4 @@
 class PostFlag < ApplicationRecord
-  class Error < StandardError; end
-
   module Reasons
     UNAPPROVED = "Unapproved in three days"
     REJECTED = "Unapproved in three days after returning to moderation queue%"
@@ -11,7 +9,7 @@ class PostFlag < ApplicationRecord
   validates :reason, presence: true, length: { in: 1..140 }
   validate :validate_creator_is_not_limited, on: :create
   validate :validate_post, on: :create
-  validates_uniqueness_of :creator_id, scope: :post_id, on: :create, unless: :is_deletion, message: "have already flagged this post"
+  validates :creator_id, uniqueness: { scope: :post_id, on: :create, unless: :is_deletion, message: "have already flagged this post" }
   before_save :update_post
   attr_accessor :is_deletion
 
@@ -99,7 +97,6 @@ class PostFlag < ApplicationRecord
   def validate_post
     errors.add(:post, "is pending and cannot be flagged") if post.is_pending? && !is_deletion
     errors.add(:post, "is deleted and cannot be flagged") if post.is_deleted? && !is_deletion
-    errors.add(:post, "is locked and cannot be flagged") if post.is_status_locked?
 
     flag = post.flags.in_cooldown.last
     if !is_deletion && flag.present?

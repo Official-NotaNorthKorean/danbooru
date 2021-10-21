@@ -33,7 +33,7 @@ class PostTest < ActiveSupport::TestCase
       setup do
         @upload = UploadService.new(FactoryBot.attributes_for(:jpg_upload)).start!
         @post = @upload.post
-        Favorite.add(post: @post, user: @user)
+        Favorite.create!(post: @post, user: @user)
         create(:favorite_group, post_ids: [@post.id])
         perform_enqueued_jobs # perform IqdbAddPostJob
       end
@@ -51,7 +51,9 @@ class PostTest < ActiveSupport::TestCase
       should "remove all favorites" do
         @post.expunge!
 
-        assert_equal(0, Favorite.for_user(@user.id).where("post_id = ?", @post.id).count)
+        assert_equal(0, @post.favorites.count)
+        assert_equal(0, @user.favorites.count)
+        assert_equal(0, @user.reload.favorite_count)
       end
 
       should "remove all favgroups" do
@@ -91,17 +93,6 @@ class PostTest < ActiveSupport::TestCase
         assert_performed_jobs(1, only: IqdbRemovePostJob)
       end
 
-      context "that is status locked" do
-        setup do
-          @post.update(is_status_locked: true)
-        end
-
-        should "not destroy the record" do
-          @post.expunge!
-          assert_equal(1, Post.where("id = ?", @post.id).count)
-        end
-      end
-
       context "that belongs to a pool" do
         setup do
           # must be a builder to update deleted pools. must be >1 week old to remove posts from pools.
@@ -136,20 +127,6 @@ class PostTest < ActiveSupport::TestCase
     end
 
     context "Deleting a post" do
-      context "that is status locked" do
-        setup do
-          @post = FactoryBot.create(:post, is_status_locked: true)
-        end
-
-        should "fail" do
-          assert_raise(ActiveRecord::RecordInvalid) do
-            @post.delete!("test")
-          end
-
-          assert_equal(false, @post.reload.is_deleted?)
-        end
-      end
-
       context "that is pending" do
         setup do
           @post = FactoryBot.create(:post, is_pending: true)
@@ -175,12 +152,11 @@ class PostTest < ActiveSupport::TestCase
 
       context "that is still in cooldown after being flagged" do
         should "succeed" do
-          post = FactoryBot.create(:post)
-          post.flag!("test flag")
-          post.delete!("test deletion")
+          flag = create(:post_flag)
+          flag.post.delete!("test deletion")
 
-          assert_equal(true, post.is_deleted)
-          assert_equal(2, post.flags.size)
+          assert_equal(true, flag.post.is_deleted)
+          assert_equal(2, flag.post.flags.size)
         end
       end
 
@@ -273,7 +249,7 @@ class PostTest < ActiveSupport::TestCase
           p1 = FactoryBot.create(:post)
           c1 = FactoryBot.create(:post, :parent_id => p1.id)
           user = FactoryBot.create(:gold_user)
-          c1.add_favorite!(user)
+          create(:favorite, post: c1, user: user)
           c1.delete!("test")
           p1.reload
           assert(Favorite.exists?(:post_id => c1.id, :user_id => user.id))
@@ -284,7 +260,7 @@ class PostTest < ActiveSupport::TestCase
           p1 = FactoryBot.create(:post)
           c1 = FactoryBot.create(:post, :parent_id => p1.id)
           user = FactoryBot.create(:gold_user)
-          c1.add_favorite!(user)
+          create(:favorite, post: c1, user: user)
           c1.delete!("test", :move_favorites => true)
           p1.reload
           assert(!Favorite.exists?(:post_id => c1.id, :user_id => user.id), "Child should not still have favorites")
@@ -303,7 +279,7 @@ class PostTest < ActiveSupport::TestCase
           user = FactoryBot.create(:gold_user)
           p1 = FactoryBot.create(:post)
           c1 = FactoryBot.create(:post, :parent_id => p1.id)
-          c1.add_favorite!(user)
+          create(:favorite, post: c1, user: user)
 
           assert_equal(true, p1.reload.has_active_children?)
           c1.delete!("test", :move_favorites => true)
@@ -345,239 +321,16 @@ class PostTest < ActiveSupport::TestCase
         end
       end
     end
-
-    context "Undeleting a post with a parent" do
-      should "update with a new approver" do
-        new_user = FactoryBot.create(:moderator_user)
-        p1 = FactoryBot.create(:post)
-        c1 = FactoryBot.create(:post, :parent_id => p1.id)
-        c1.delete!("test")
-        c1.approve!(new_user)
-        p1.reload
-        assert_equal(new_user.id, c1.approver_id)
-      end
-
-      should "preserve the parent's has_children flag" do
-        p1 = FactoryBot.create(:post)
-        c1 = FactoryBot.create(:post, :parent_id => p1.id)
-        c1.delete!("test")
-        c1.approve!
-        p1.reload
-        assert_not_nil(c1.parent_id)
-        assert(p1.has_children?, "Parent should have children")
-      end
-    end
   end
 
   context "Moderation:" do
     context "A deleted post" do
-      setup do
-        @post = FactoryBot.create(:post, :is_deleted => true)
-      end
-
-      context "that is status locked" do
-        setup do
-          @post.update(is_status_locked: true)
-        end
-
-        should "not allow undeletion" do
-          approval = @post.approve!
-          assert_equal(["Post is locked and cannot be approved"], approval.errors.full_messages)
-          assert_equal(true, @post.is_deleted?)
-        end
-      end
-
-      context "that is undeleted" do
-        setup do
-          @mod = FactoryBot.create(:moderator_user)
-          CurrentUser.user = @mod
-        end
-
-        context "by the approver" do
-          setup do
-            @post.update_attribute(:approver_id, @mod.id)
-          end
-
-          should "not be permitted" do
-            approval = @post.approve!
-
-            assert_equal(false, approval.valid?)
-            assert_equal(["You have previously approved this post and cannot approve it again"], approval.errors.full_messages)
-          end
-        end
-
-        context "by the uploader" do
-          setup do
-            @post.update_attribute(:uploader_id, @mod.id)
-          end
-
-          should "not be permitted" do
-            approval = @post.approve!
-
-            assert_equal(false, approval.valid?)
-            assert_equal(["You cannot approve a post you uploaded"], approval.errors.full_messages)
-          end
-        end
-      end
-
-      context "when undeleted" do
-        should "be undeleted" do
-          @post.approve!
-          assert_equal(false, @post.reload.is_deleted?)
-        end
-
-        should "create a mod action" do
-          @post.approve!
-          assert_equal("undeleted post ##{@post.id}", ModAction.last.description)
-          assert_equal("post_undelete", ModAction.last.category)
-        end
-      end
-
-      context "when approved" do
-        should "be undeleted" do
-          @post.approve!
-          assert_equal(false, @post.reload.is_deleted?)
-        end
-
-        should "create a mod action" do
-          @post.approve!
-          assert_equal("undeleted post ##{@post.id}", ModAction.last.description)
-          assert_equal("post_undelete", ModAction.last.category)
-        end
-      end
-
       should "be appealed" do
+        @post = create(:post, is_deleted: true)
         create(:post_appeal, post: @post)
+
         assert(@post.is_deleted?, "Post should still be deleted")
         assert_equal(1, @post.appeals.count)
-      end
-    end
-
-    context "An approved post" do
-      should "be flagged" do
-        post = FactoryBot.create(:post)
-        assert_difference("PostFlag.count", 1) do
-          post.flag!("bad")
-        end
-        assert(post.is_flagged?, "Post should be flagged.")
-        assert_equal(1, post.flags.count)
-      end
-
-      should "not be flagged if no reason is given" do
-        post = FactoryBot.create(:post)
-        assert_difference("PostFlag.count", 0) do
-          assert_raises(PostFlag::Error) do
-            post.flag!("")
-          end
-        end
-      end
-    end
-
-    context "An unapproved post" do
-      should "preserve the approver's identity when approved" do
-        post = FactoryBot.create(:post, :is_pending => true)
-        post.approve!
-        assert_equal(post.approver_id, CurrentUser.id)
-      end
-
-      context "that was previously approved by person X" do
-        setup do
-          @user = FactoryBot.create(:moderator_user, :name => "xxx")
-          @user2 = FactoryBot.create(:moderator_user, :name => "yyy")
-          @post = FactoryBot.create(:post, :approver_id => @user.id)
-          @post.flag!("bad")
-        end
-
-        should "not allow person X to reapprove that post" do
-          approval = @post.approve!(@user)
-          assert_includes(approval.errors.full_messages, "You have previously approved this post and cannot approve it again")
-        end
-
-        should "allow person Y to approve the post" do
-          @post.approve!(@user2)
-          assert(@post.valid?)
-        end
-      end
-
-      context "that has been reapproved" do
-        should "no longer be flagged or pending" do
-          post = FactoryBot.create(:post)
-          post.flag!("bad")
-          post.approve!
-          assert(post.errors.empty?, post.errors.full_messages.join(", "))
-          post.reload
-          assert_equal(false, post.is_flagged?)
-          assert_equal(false, post.is_pending?)
-        end
-      end
-    end
-
-    context "A status locked post" do
-      should "not allow new flags" do
-        assert_raises(PostFlag::Error) do
-          @post = create(:post, is_status_locked: true)
-          @post.flag!("wrong")
-        end
-      end
-
-      should "not allow new appeals" do
-        @post = create(:post, is_status_locked: true, is_deleted: true)
-        @appeal = build(:post_appeal, post: @post)
-
-        assert_equal(false, @appeal.valid?)
-        assert_equal(["Post cannot be appealed"], @appeal.errors.full_messages)
-      end
-
-      should "not allow approval" do
-        @post = create(:post, is_status_locked: true, is_pending: true)
-        approval = @post.approve!
-        assert_includes(approval.errors.full_messages, "Post is locked and cannot be approved")
-      end
-    end
-
-    context "Locking post fields" do
-      should "create ModAction entries" do
-        @post = create(:post)
-        assert_difference("ModAction.post_note_lock_create.count", 1) do
-          @post.is_note_locked = true
-          @post.save!
-        end
-
-        assert_difference("ModAction.post_note_lock_delete.count", 1) do
-          @post.is_note_locked = false
-          @post.save!
-        end
-
-        assert_difference("ModAction.post_rating_lock_create.count", 1) do
-          @post.is_rating_locked = true
-          @post.save!
-        end
-
-        assert_difference("ModAction.post_rating_lock_delete.count", 1) do
-          @post.is_rating_locked = false
-          @post.save!
-        end
-
-        assert_difference("ModAction.post_status_lock_create.count", 1) do
-          @post.is_status_locked = true
-          @post.save!
-        end
-
-        assert_difference("ModAction.post_status_lock_delete.count", 1) do
-          @post.is_status_locked = false
-          @post.save!
-        end
-
-        assert_difference("ModAction.post_status_lock_create.count", 1) do
-          assert_difference("ModAction.post_rating_lock_create.count", 1) do
-            assert_difference("ModAction.post_note_lock_create.count", 1) do
-              @post.is_status_locked = true
-              @post.is_rating_locked = true
-              @post.is_note_locked = true
-              @post.save!
-            end
-          end
-        end
       end
     end
   end
@@ -857,7 +610,6 @@ class PostTest < ActiveSupport::TestCase
               @post.reload
               @pool.reload
               assert_equal([@post.id], @pool.post_ids)
-              assert_equal("pool:#{@pool.id}", @post.pool_string)
             end
           end
 
@@ -865,7 +617,7 @@ class PostTest < ActiveSupport::TestCase
             setup do
               @pool = FactoryBot.create(:pool)
               @post = FactoryBot.create(:post, :tag_string => "aaa")
-              @post.add_pool!(@pool)
+              @pool.add!(@post)
               @post.tag_string = "aaa -pool:#{@pool.id}"
               @post.save
             end
@@ -874,7 +626,6 @@ class PostTest < ActiveSupport::TestCase
               @post.reload
               @pool.reload
               assert_equal([], @pool.post_ids)
-              assert_equal("", @post.pool_string)
             end
           end
 
@@ -888,7 +639,6 @@ class PostTest < ActiveSupport::TestCase
               @post.reload
               @pool.reload
               assert_equal([@post.id], @pool.post_ids)
-              assert_equal("pool:#{@pool.id}", @post.pool_string)
             end
           end
 
@@ -903,7 +653,6 @@ class PostTest < ActiveSupport::TestCase
                 @post.reload
                 @pool.reload
                 assert_equal([@post.id], @pool.post_ids)
-                assert_equal("pool:#{@pool.id}", @post.pool_string)
               end
             end
 
@@ -914,7 +663,6 @@ class PostTest < ActiveSupport::TestCase
                 @post.reload
                 assert_not_nil(@pool)
                 assert_equal([@post.id], @pool.post_ids)
-                assert_equal("pool:#{@pool.id}", @post.pool_string)
               end
             end
 
@@ -943,42 +691,23 @@ class PostTest < ActiveSupport::TestCase
               assert_equal("q", @post.rating)
             end
           end
-
-          context "that is locked" do
-            should "change the rating if locked in the same update" do
-              @post.update(tag_string: "rating:e", is_rating_locked: true)
-
-              assert(@post.valid?)
-              assert_equal("e", @post.reload.rating)
-            end
-
-            should "not change the rating if locked previously" do
-              @post.is_rating_locked = true
-              @post.save
-
-              @post.update(:tag_string => "rating:e")
-
-              assert(@post.invalid?)
-              assert_not_equal("e", @post.reload.rating)
-            end
-          end
         end
 
         context "for a fav" do
           should "add/remove the current user to the post's favorite listing" do
             @post.update(tag_string: "aaa fav:self")
-            assert_equal("fav:#{@user.id}", @post.fav_string)
+            assert_equal(1, @post.favorites.where(user: @user).count)
 
             @post.update(tag_string: "aaa -fav:self")
-            assert_equal("", @post.fav_string)
+            assert_equal(0, @post.favorites.count)
           end
 
           should "not fail when the fav: metatag is used twice" do
             @post.update(tag_string: "aaa fav:self fav:me")
-            assert_equal("fav:#{@user.id}", @post.fav_string)
+            assert_equal(1, @post.favorites.where(user: @user).count)
 
             @post.update(tag_string: "aaa -fav:self -fav:me")
-            assert_equal("", @post.fav_string)
+            assert_equal(0, @post.favorites.count)
           end
         end
 
@@ -1133,75 +862,6 @@ class PostTest < ActiveSupport::TestCase
 
         context "of" do
           setup do
-            @builder = FactoryBot.create(:builder_user)
-          end
-
-          context "locked:notes" do
-            context "by a member" do
-              should "not lock the notes" do
-                @post.update(:tag_string => "locked:notes")
-                assert_equal(false, @post.is_note_locked)
-              end
-            end
-
-            context "by a builder" do
-              should "lock/unlock the notes" do
-                CurrentUser.scoped(@builder) do
-                  @post.update(:tag_string => "locked:notes")
-                  assert_equal(true, @post.is_note_locked)
-
-                  @post.update(:tag_string => "-locked:notes")
-                  assert_equal(false, @post.is_note_locked)
-                end
-              end
-            end
-          end
-
-          context "locked:rating" do
-            context "by a member" do
-              should "not lock the rating" do
-                @post.update(:tag_string => "locked:rating")
-                assert_equal(false, @post.is_rating_locked)
-              end
-            end
-
-            context "by a builder" do
-              should "lock/unlock the rating" do
-                CurrentUser.scoped(@builder) do
-                  @post.update(:tag_string => "locked:rating")
-                  assert_equal(true, @post.is_rating_locked)
-
-                  @post.update(:tag_string => "-locked:rating")
-                  assert_equal(false, @post.is_rating_locked)
-                end
-              end
-            end
-          end
-
-          context "locked:status" do
-            context "by a member" do
-              should "not lock the status" do
-                @post.update(:tag_string => "locked:status")
-                assert_equal(false, @post.is_status_locked)
-              end
-            end
-
-            context "by an admin" do
-              should "lock/unlock the status" do
-                CurrentUser.scoped(FactoryBot.create(:admin_user)) do
-                  @post.update(:tag_string => "locked:status")
-                  assert_equal(true, @post.is_status_locked)
-
-                  @post.update(:tag_string => "-locked:status")
-                  assert_equal(false, @post.is_status_locked)
-                end
-              end
-            end
-          end
-        end
-
-        context "of" do
-          setup do
             @gold = FactoryBot.create(:gold_user)
           end
 
@@ -1282,13 +942,80 @@ class PostTest < ActiveSupport::TestCase
         end
       end
 
-      context "tagged with animated_gif or animated_png" do
-        should "remove the tag if not a gif or png" do
-          @post.update(tag_string: "tagme animated_gif")
+      context "a static image tagged with animated_gif" do
+        should "remove the tag" do
+          @media_asset = create(:media_asset, file: "test/files/test-static-32x32.gif")
+          @post.update!(md5: @media_asset.md5)
+          @post.reload.update!(tag_string: "tagme animated animated_gif")
           assert_equal("tagme", @post.tag_string)
+        end
+      end
 
-          @post.update(tag_string: "tagme animated_png")
+      context "a static image tagged with animated_png" do
+        should "remove the tag" do
+          @media_asset = create(:media_asset, file: "test/files/test.png")
+          @post.update!(md5: @media_asset.md5)
+          @post.reload.update!(tag_string: "tagme animated animated_png")
           assert_equal("tagme", @post.tag_string)
+        end
+      end
+
+      context "an animated gif missing the animated_gif tag" do
+        should "automatically add the animated_gif tag" do
+          @media_asset = MediaAsset.create!(file: "test/files/test-animated-86x52.gif")
+          @post.update!(md5: @media_asset.md5)
+          @post.reload.update!(tag_string: "tagme")
+          assert_equal("animated animated_gif tagme", @post.tag_string)
+        end
+      end
+
+      context "an animated png missing the animated_png tag" do
+        should "automatically add the animated_png tag" do
+          @media_asset = MediaAsset.create!(file: "test/files/test-animated-256x256.png")
+          @post.update!(md5: @media_asset.md5)
+          @post.reload.update!(tag_string: "tagme")
+          assert_equal("animated animated_png tagme", @post.tag_string)
+        end
+      end
+
+      context "a greyscale image missing the greyscale tag" do
+        should "automatically add the greyscale tag" do
+          @media_asset = MediaAsset.create!(file: "test/files/test-grey-no-profile.jpg")
+          @post.update!(md5: @media_asset.md5)
+          @post.reload.update!(tag_string: "tagme")
+          assert_equal("greyscale tagme", @post.tag_string)
+        end
+      end
+
+      context "an exif-rotated image missing the exif_rotation tag" do
+        should "automatically add the exif_rotation tag" do
+          @media_asset = MediaAsset.create!(file: "test/files/test-rotation-90cw.jpg")
+          @post.update!(md5: @media_asset.md5)
+          @post.reload.update!(tag_string: "tagme")
+          assert_equal("exif_rotation tagme", @post.tag_string)
+        end
+      end
+
+      context "a PNG with the exif orientation flag" do
+        should "not add the exif_rotation tag" do
+          @media_asset = MediaAsset.create!(file: "test/files/test-rotation-90cw.png")
+          @post.update!(md5: @media_asset.md5)
+          @post.reload.update!(tag_string: "tagme")
+          assert_equal("tagme", @post.tag_string)
+        end
+      end
+
+      context "a non-repeating GIF missing the non-repeating_animation tag" do
+        should "automatically add the non-repeating_animation tag" do
+          @media_asset = MediaAsset.create!(file: "test/files/test-animated-86x52-loop-1.gif")
+          @post.update!(md5: @media_asset.md5)
+          @post.reload.update!(tag_string: "tagme")
+          assert_equal("animated animated_gif non-repeating_animation tagme", @post.tag_string)
+
+          @media_asset = MediaAsset.create!(file: "test/files/test-animated-86x52-loop-2.gif")
+          @post.update!(md5: @media_asset.md5)
+          @post.reload.update!(tag_string: "tagme")
+          assert_equal("animated animated_gif non-repeating_animation tagme", @post.tag_string)
         end
       end
 
@@ -1312,18 +1039,6 @@ class PostTest < ActiveSupport::TestCase
           assert_match(/incredibly_absurdres/, @post.tag_string)
           assert_match(/absurdres/, @post.tag_string)
           assert_match(/highres/, @post.tag_string)
-        end
-      end
-
-      context "with a large file size" do
-        setup do
-          @post.file_size = 11.megabytes
-          @post.tag_string = ""
-          @post.save
-        end
-
-        should "have the appropriate file size tags added automatically" do
-          assert_match(/huge_filesize/, @post.tag_string)
         end
       end
 
@@ -1668,25 +1383,6 @@ class PostTest < ActiveSupport::TestCase
         end
       end
     end
-
-    context "A rating locked post" do
-      setup { @post = FactoryBot.create(:post, :is_rating_locked => true) }
-      subject { @post }
-
-      should "not allow values S, safe, derp" do
-        ["S", "safe", "derp"].each do |rating|
-          subject.rating = rating
-          assert(!subject.valid?)
-        end
-      end
-
-      should "not allow values s, e" do
-        ["s", "e"].each do |rating|
-          subject.rating = rating
-          assert(!subject.valid?)
-        end
-      end
-    end
   end
 
   context "Favorites:" do
@@ -1694,33 +1390,33 @@ class PostTest < ActiveSupport::TestCase
       setup do
         @user = FactoryBot.create(:contributor_user)
         @post = FactoryBot.create(:post)
-        @post.add_favorite!(@user)
+        create(:favorite, post: @post, user: @user)
         @user.reload
       end
 
       should "decrement the user's favorite_count" do
-        assert_difference("@user.favorite_count", -1) do
-          @post.remove_favorite!(@user)
+        assert_difference("@user.reload.favorite_count", -1) do
+          Favorite.destroy_by(post: @post, user: @user)
         end
       end
 
       should "decrement the post's score for gold users" do
-        assert_difference("@post.score", -1) do
-          @post.remove_favorite!(@user)
+        assert_difference("@post.reload.score", -1) do
+          Favorite.destroy_by(post: @post, user: @user)
         end
       end
 
       should "not decrement the post's score for basic users" do
         @member = FactoryBot.create(:user)
 
-        assert_no_difference("@post.score") { @post.add_favorite!(@member) }
-        assert_no_difference("@post.score") { @post.remove_favorite!(@member) }
+        assert_no_difference("@post.score") { create(:favorite, post: @post, user: @member) }
+        assert_no_difference("@post.score") { Favorite.destroy_by(post: @post, user: @member) }
       end
 
       should "not decrement the user's favorite_count if the user did not favorite the post" do
         @post2 = FactoryBot.create(:post)
         assert_no_difference("@user.favorite_count") do
-          @post2.remove_favorite!(@user)
+          Favorite.destroy_by(post: @post2, user: @user)
         end
       end
     end
@@ -1731,52 +1427,21 @@ class PostTest < ActiveSupport::TestCase
         @post = FactoryBot.create(:post)
       end
 
-      should "periodically clean the fav_string" do
-        @post.update_column(:fav_string, "fav:1 fav:1 fav:1")
-        @post.update_column(:fav_count, 3)
-        @post.stubs(:clean_fav_string?).returns(true)
-        @post.append_user_to_fav_string(2)
-        assert_equal("fav:1 fav:2", @post.fav_string)
-        assert_equal(2, @post.fav_count)
-      end
-
       should "increment the user's favorite_count" do
         assert_difference("@user.favorite_count", 1) do
-          @post.add_favorite!(@user)
+          create(:favorite, post: @post, user: @user)
         end
       end
 
       should "increment the post's score for gold users" do
-        @post.add_favorite!(@user)
-        assert_equal(1, @post.score)
+        create(:favorite, post: @post, user: @user)
+        assert_equal(1, @post.reload.score)
       end
 
       should "not increment the post's score for basic users" do
         @member = FactoryBot.create(:user)
-        @post.add_favorite!(@member)
+        create(:favorite, post: @post, user: @member)
         assert_equal(0, @post.score)
-      end
-
-      should "update the fav strings on the post" do
-        @post.add_favorite!(@user)
-        @post.reload
-        assert_equal("fav:#{@user.id}", @post.fav_string)
-        assert(Favorite.exists?(:user_id => @user.id, :post_id => @post.id))
-
-        assert_raises(Favorite::Error) { @post.add_favorite!(@user) }
-        @post.reload
-        assert_equal("fav:#{@user.id}", @post.fav_string)
-        assert(Favorite.exists?(:user_id => @user.id, :post_id => @post.id))
-
-        @post.remove_favorite!(@user)
-        @post.reload
-        assert_equal("", @post.fav_string)
-        assert(!Favorite.exists?(:user_id => @user.id, :post_id => @post.id))
-
-        @post.remove_favorite!(@user)
-        @post.reload
-        assert_equal("", @post.fav_string)
-        assert(!Favorite.exists?(:user_id => @user.id, :post_id => @post.id))
       end
     end
 
@@ -1788,8 +1453,8 @@ class PostTest < ActiveSupport::TestCase
         @user1 = FactoryBot.create(:user, enable_private_favorites: true)
         @gold1 = FactoryBot.create(:gold_user)
 
-        @child.add_favorite!(@user1)
-        @child.add_favorite!(@gold1)
+        create(:favorite, post: @child, user: @user1)
+        create(:favorite, post: @child, user: @gold1)
 
         @child.give_favorites_to_parent
         @child.reload
@@ -1799,12 +1464,10 @@ class PostTest < ActiveSupport::TestCase
       should "move the favorites" do
         assert_equal(0, @child.fav_count)
         assert_equal(0, @child.favorites.count)
-        assert_equal("", @child.fav_string)
         assert_equal([], @child.favorites.pluck(:user_id))
 
         assert_equal(2, @parent.fav_count)
         assert_equal(2, @parent.favorites.count)
-        assert_equal("fav:#{@user1.id} fav:#{@gold1.id}", @parent.fav_string)
         assert_equal([@user1.id, @gold1.id], @parent.favorites.pluck(:user_id))
       end
 
@@ -1818,36 +1481,6 @@ class PostTest < ActiveSupport::TestCase
   context "Pools:" do
     setup do
       SqsService.any_instance.stubs(:send_message)
-    end
-
-    context "Removing a post from a pool" do
-      should "update the post's pool string" do
-        post = FactoryBot.create(:post)
-        pool = FactoryBot.create(:pool)
-        post.add_pool!(pool)
-        post.remove_pool!(pool)
-        post.reload
-        assert_equal("", post.pool_string)
-        post.remove_pool!(pool)
-        post.reload
-        assert_equal("", post.pool_string)
-      end
-    end
-
-    context "Adding a post to a pool" do
-      should "update the post's pool string" do
-        post = FactoryBot.create(:post)
-        pool = FactoryBot.create(:pool)
-        post.add_pool!(pool)
-        post.reload
-        assert_equal("pool:#{pool.id}", post.pool_string)
-        post.add_pool!(pool)
-        post.reload
-        assert_equal("pool:#{pool.id}", post.pool_string)
-        post.remove_pool!(pool)
-        post.reload
-        assert_equal("", post.pool_string)
-      end
     end
   end
 
@@ -1949,34 +1582,6 @@ class PostTest < ActiveSupport::TestCase
   end
 
   context "Reverting: " do
-    context "a post that is rating locked" do
-      setup do
-        @post = FactoryBot.create(:post, :rating => "s")
-        travel(2.hours) do
-          @post.update(rating: "q", is_rating_locked: true)
-        end
-      end
-
-      should "not revert the rating" do
-        assert_raises ActiveRecord::RecordInvalid do
-          @post.revert_to!(@post.versions.first)
-        end
-
-        assert_equal(["Rating is locked and cannot be changed. Unlock the post first."], @post.errors.full_messages)
-        assert_equal(@post.versions.last.rating, @post.reload.rating)
-      end
-
-      should "revert the rating after unlocking" do
-        @post.update(rating: "e", is_rating_locked: false)
-        assert_nothing_raised do
-          @post.revert_to!(@post.versions.first)
-        end
-
-        assert(@post.valid?)
-        assert_equal(@post.versions.first.rating, @post.rating)
-      end
-    end
-
     context "a post that has been updated" do
       setup do
         PostVersion.sqs_service.stubs(:merge?).returns(false)

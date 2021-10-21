@@ -24,27 +24,34 @@ module Searchable
     q
   end
 
-  # Search a table field by an Arel operator. `field` may be an Arel node, the
-  # name of a table column, or raw SQL. `operator` is an Arel::Predications
-  # method: :eq, :gt, :lt, :between, :in, :matches (LIKE), etc.
+  # Search a table column by an Arel operator.
   #
-  # https://github.com/rails/rails/blob/master/activerecord/lib/arel/predications.rb
+  # @see https://github.com/rails/rails/blob/master/activerecord/lib/arel/predications.rb
+  #
+  # @example SELECT * FROM posts WHERE id <= 42
+  #   Post.where_operator(:id, :lteq, 42)
+  #
+  # @param field [String, Arel::Nodes::Node] the name of a table column, an
+  #   Arel node, or raw SQL
+  # @param operator [Symbol] the name of an Arel::Predications method (:eq,
+  #   :gt, :lt, :between, :in, :matches (LIKE), etc).
+  # @return ActiveRecord::Relation
   def where_operator(field, operator, *args, **options)
-    if field.is_a?(Arel::Nodes::Node)
-      node = field
-    elsif has_attribute?(field)
-      node = arel_table[field]
-    else
-      node = Arel.sql(field.to_s)
-    end
-
-    arel = node.send(operator, *args, **options)
+    arel = arel_node(field).send(operator, *args, **options)
     where(arel)
   end
 
+  def where_not_operator(field, operator, *args, **options)
+    arel = arel_node(field).send(operator, *args, **options)
+    where.not(arel)
+  end
+
   def where_array_operator(attr, operator, values)
-    array = Arel.sql(ActiveRecord::Base.sanitize_sql(["ARRAY[?]", values]))
-    where_operator(attr, operator, array)
+    where_operator(attr, operator, sql_array(values))
+  end
+
+  def where_not_array_operator(attr, operator, values)
+    where_not_operator(attr, operator, sql_array(values))
   end
 
   def where_like(attr, value)
@@ -95,6 +102,10 @@ module Searchable
   # The @> operator
   def where_array_includes_all(attr, values)
     where_array_operator(attr, :contains, values)
+  end
+
+  def where_array_includes_none(attr, values)
+    where_not_array_operator(attr, :overlaps, values)
   end
 
   def where_array_includes_any_lower(attr, values)
@@ -149,6 +160,16 @@ module Searchable
     where("#{qualified_column_for(attr)} ? :key", key: key)
   end
 
+  # https://www.postgresql.org/docs/current/textsearch-controls.html#TEXTSEARCH-PARSING-DOCUMENTS
+  # https://www.postgresql.org/docs/current/textsearch-controls.html#TEXTSEARCH-PARSING-QUERIES
+  def where_tsvector_matches(columns, query)
+    tsvectors = Array.wrap(columns).map do |column|
+      to_tsvector("pg_catalog.english", arel_table[column])
+    end.reduce(:concat)
+
+    where("(#{tsvectors.to_sql}) @@ websearch_to_tsquery('pg_catalog.english', :query)", query: query)
+  end
+
   def search_boolean_attribute(attr, params)
     if params[attr].present?
       boolean_attribute_matches(attr, params[attr])
@@ -183,18 +204,17 @@ module Searchable
     end
   end
 
-  def text_attribute_matches(attribute, value, index_column: nil, ts_config: "english")
-    return all unless value.present?
+  def text_attribute_matches(columns, query)
+    columns = Array.wrap(columns)
 
-    column = column_for_attribute(attribute)
-    qualified_column = "#{table_name}.#{column.name}"
-
-    if value =~ /\*/
-      where("lower(#{qualified_column}) LIKE :value ESCAPE E'\\\\'", value: value.mb_chars.downcase.to_escaped_for_sql_like)
-    elsif index_column.present?
-      where("#{table_name}.#{index_column} @@ plainto_tsquery(:ts_config, :value)", ts_config: ts_config, value: value)
+    if query.nil?
+      all
+    elsif query =~ /\*/
+      columns.map do |column|
+        where_ilike(column, query)
+      end.reduce(:or)
     else
-      where("to_tsvector(:ts_config, #{qualified_column}) @@ plainto_tsquery(:ts_config, :value)", ts_config: ts_config, value: value)
+      where_tsvector_matches(columns, query)
     end
   end
 
@@ -294,6 +314,14 @@ module Searchable
 
     if params[attr].present?
       relation = relation.where(attr => params[attr])
+    end
+
+    if params[:"#{attr}_present"].present? && params[:"#{attr}_present"].truthy?
+      relation = relation.where.not(attr => "")
+    end
+
+    if params[:"#{attr}_present"].present? && params[:"#{attr}_present"].falsy?
+      relation = relation.where(attr => "")
     end
 
     if params[:"#{attr}_eq"].present?
@@ -560,5 +588,53 @@ module Searchable
 
   def qualified_column_for(attr)
     "#{table_name}.#{column_for_attribute(attr).name}"
+  end
+
+  # Convert a column name or a raw SQL fragment to an Arel node.
+  #
+  # @param field [String, Arel::Nodes::Node] an Arel node, the name of a table
+  #   column, or a raw SQL fragment
+  # @return Arel::Expressions the Arel node
+  def arel_node(field)
+    if field.is_a?(Arel::Nodes::Node)
+      field
+    elsif has_attribute?(field)
+      arel_table[field]
+    else
+      Arel.sql(field.to_s)
+    end
+  end
+
+  def sql_value(value)
+    if Arel.arel_node?(value)
+      value
+    elsif value.is_a?(String)
+      Arel::Nodes.build_quoted(value)
+    elsif value.is_a?(Symbol)
+      arel_table[value]
+    elsif value.is_a?(Array)
+      sql_array(value)
+    else
+      raise ArgumentError
+    end
+  end
+
+  # Convert a Ruby array to an SQL array.
+  #
+  # @param values [Array]
+  # @return Arel::Nodes::SqlLiteral
+  def sql_array(array)
+    Arel.sql(ActiveRecord::Base.sanitize_sql(["ARRAY[?]", array]))
+  end
+
+  # @example Tag.sql_function(:sum, Tag.arel_table[:post_count]).to_sql == "SUM(tags.post_count)"
+  def sql_function(name, *args)
+    Arel::Nodes::NamedFunction.new(name.to_s, args.map { |arg| sql_value(arg) })
+  end
+
+  # @example Note.to_tsvector("pg_catalog.english", :body).to_sql == "to_tsvector('pg_catalog.english', notes.body)"
+  # https://www.postgresql.org/docs/current/textsearch-controls.html#TEXTSEARCH-PARSING-DOCUMENTS
+  def to_tsvector(config, column)
+    sql_function(:to_tsvector, config, column)
   end
 end

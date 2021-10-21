@@ -19,7 +19,7 @@ class Upload < ApplicationRecord
     end
 
     def validate_integrity(record)
-      if record.media_file.is_corrupt?
+      if record.file.is_corrupt?
         record.errors.add(:file, "is corrupted")
       end
     end
@@ -55,7 +55,7 @@ class Upload < ApplicationRecord
     end
 
     def validate_video_duration(record)
-      if !record.uploader.is_admin? && record.media_file.is_video? && record.media_file.duration > MAX_VIDEO_DURATION
+      if !record.uploader.is_admin? && record.file.is_video? && record.file.duration > MAX_VIDEO_DURATION
         record.errors.add(:base, "video must not be longer than #{MAX_VIDEO_DURATION.seconds.inspect}")
       end
     end
@@ -105,24 +105,15 @@ class Upload < ApplicationRecord
   end
 
   concerning :FileMethods do
-    def media_file
-      @media_file ||= MediaFile.open(file, frame_data: context.to_h.dig("ugoira", "frame_data"))
-    end
-
     def delete_files
       # md5 is blank if the upload errored out before downloading the file.
       if is_completed? || md5.blank? || Upload.exists?(md5: md5) || Post.exists?(md5: md5)
         return
       end
 
-      media_asset.destroy!
+      media_asset&.destroy!
+      media_asset&.delete_files!
       DanbooruLogger.info("Uploads: Deleting files for upload md5=#{md5}")
-      Danbooru.config.storage_manager.delete_file(nil, md5, file_ext, :original)
-      Danbooru.config.storage_manager.delete_file(nil, md5, file_ext, :large)
-      Danbooru.config.storage_manager.delete_file(nil, md5, file_ext, :preview)
-      Danbooru.config.backup_storage_manager.delete_file(nil, md5, file_ext, :original)
-      Danbooru.config.backup_storage_manager.delete_file(nil, md5, file_ext, :large)
-      Danbooru.config.backup_storage_manager.delete_file(nil, md5, file_ext, :preview)
     end
   end
 
@@ -215,7 +206,9 @@ class Upload < ApplicationRecord
   end
 
   def assign_rating_from_tags
-    if rating = PostQueryBuilder.new(tag_string).find_metatag(:rating)
+    rating = PostQueryBuilder.new(tag_string).find_metatag(:rating)
+
+    if rating.present?
       self.rating = rating.downcase.first
     end
   end

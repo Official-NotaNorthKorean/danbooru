@@ -10,7 +10,6 @@ class Pool < ApplicationRecord
   validate :updater_can_edit_deleted
   before_validation :normalize_post_ids
   before_validation :normalize_name
-  after_create :synchronize!
   after_save :create_version
 
   deletable
@@ -130,7 +129,7 @@ class Pool < ApplicationRecord
     self.post_ids = version.post_ids
     self.name = version.name
     self.description = version.description
-    synchronize!
+    save!
   end
 
   def contains?(post_id)
@@ -161,7 +160,6 @@ class Pool < ApplicationRecord
 
     with_lock do
       update(post_ids: post_ids + [post.id])
-      post.add_pool!(self, true)
     end
   end
 
@@ -171,37 +169,13 @@ class Pool < ApplicationRecord
     with_lock do
       reload
       update(post_ids: post_ids - [post.id])
-      post.remove_pool!(self)
     end
   end
 
   # XXX unify with PostQueryBuilder ordpool search
   def posts
     pool_posts = Pool.where(id: id).joins("CROSS JOIN unnest(pools.post_ids) WITH ORDINALITY AS row(post_id, pool_index)").select(:post_id, :pool_index)
-    posts = Post.joins("JOIN (#{pool_posts.to_sql}) pool_posts ON pool_posts.post_id = posts.id").order("pool_posts.pool_index ASC")
-  end
-
-  def synchronize
-    post_ids_before = post_ids_before_last_save || post_ids_was
-    added = post_ids - post_ids_before
-    removed = post_ids_before - post_ids
-
-    added.each do |post_id|
-      post = Post.find(post_id)
-      post.add_pool!(self, true)
-    end
-
-    removed.each do |post_id|
-      post = Post.find(post_id)
-      post.remove_pool!(self)
-    end
-
-    normalize_post_ids
-  end
-
-  def synchronize!
-    synchronize
-    save if will_save_change_to_post_ids?
+    Post.joins("JOIN (#{pool_posts.to_sql}) pool_posts ON pool_posts.post_id = posts.id").order("pool_posts.pool_index ASC")
   end
 
   def post_count

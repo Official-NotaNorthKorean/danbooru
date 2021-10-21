@@ -14,70 +14,21 @@ class UploadServiceTest < ActiveSupport::TestCase
     }
   }
 
+  def assert_file_exists(upload, variant)
+    assert_nothing_raised { upload.media_asset.variant(variant).open_file }
+  end
+
+  def assert_file_does_not_exist(upload, variant)
+    assert_raise { upload.media_asset.variant(variant).open_file }
+  end
+
   context "::Utils" do
-    context "#get_file_for_upload" do
-      context "for a non-source site" do
-        setup do
-          @source = "https://upload.wikimedia.org/wikipedia/commons/c/c5/Moraine_Lake_17092005.jpg"
-          @upload = Upload.new
-          @upload.source = @source
-        end
-
-        should "work on a jpeg" do
-          file = UploadService::Utils.get_file_for_upload(@upload)
-          assert_operator(File.size(file.path), :>, 0)
-          file.close
-        end
-      end
-
-      context "for a pixiv" do
-        setup do
-          @source = "http://www.pixiv.net/member_illust.php?mode=medium&illust_id=62247350"
-          @upload = Upload.new
-          @upload.source = @source
-        end
-
-        should "work on an ugoira url" do
-          begin
-            file = UploadService::Utils.get_file_for_upload(@upload)
-            assert_operator(File.size(file.path), :>, 0)
-            file.close
-          end
-        end
-      end
-
-      context "for a pixiv ugoira" do
-        setup do
-          @source = "https://i.pximg.net/img-zip-ugoira/img/2017/04/04/08/57/38/62247364_ugoira1920x1080.zip"
-          @referer = "http://www.pixiv.net/member_illust.php?mode=medium&illust_id=62247364"
-          @upload = Upload.new
-          @upload.source = @source
-          @upload.referer_url = @referer
-        end
-
-        should "work on an ugoira url" do
-          file = UploadService::Utils.get_file_for_upload(@upload)
-
-          assert_not_nil(@upload.context["ugoira"])
-          assert_operator(File.size(file.path), :>, 0)
-        end
-      end
-    end
-
     context ".process_file" do
       setup do
         @upload = FactoryBot.build(:jpg_upload)
       end
 
-      context "with an original_post_id" do
-        should "run" do
-          UploadService::Utils.expects(:distribute_files).times(3)
-          UploadService::Utils.process_file(@upload, @upload.file.tempfile, original_post_id: 12345)
-        end
-      end
-
       should "run" do
-        UploadService::Utils.expects(:distribute_files).times(3)
         UploadService::Utils.process_file(@upload, @upload.file.tempfile)
         assert_equal("jpg", @upload.file_ext)
         assert_equal(28086, @upload.file_size)
@@ -87,7 +38,6 @@ class UploadServiceTest < ActiveSupport::TestCase
       end
 
       should "create a media asset" do
-        UploadService::Utils.expects(:distribute_files).times(3)
         UploadService::Utils.process_file(@upload, @upload.file.tempfile)
 
         @media_asset = @upload.media_asset
@@ -122,6 +72,7 @@ class UploadServiceTest < ActiveSupport::TestCase
 
       context "for twitter" do
         setup do
+          skip "Twitter credentials not configured" unless Sources::Strategies::Twitter.enabled?
           @source = "https://pbs.twimg.com/media/B4HSEP5CUAA4xyu.png:large"
           @ref = "https://twitter.com/nounproject/status/540944400767922176"
         end
@@ -133,13 +84,14 @@ class UploadServiceTest < ActiveSupport::TestCase
           assert_equal(9800, @upload.file_size)
           assert_equal("png", @upload.file_ext)
           assert_equal("f5fe24f3a3a13885285f6627e04feec9", @upload.md5)
-          assert(File.exist?(Danbooru.config.storage_manager.file_path(@upload.md5, "png", :original)))
-          assert(File.exist?(Danbooru.config.storage_manager.file_path(@upload.md5, "png", :preview)))
+          assert_file_exists(@upload, :preview)
+          assert_file_exists(@upload, :original)
         end
       end
 
       context "for pixiv" do
         setup do
+          skip "Pixiv credentials not configured" unless Sources::Strategies::Pixiv.enabled?
           @source = "https://i.pximg.net/img-original/img/2014/10/29/09/27/19/46785915_p0.jpg"
           @ref = "https://www.pixiv.net/member_illust.php?mode=medium&illust_id=46785915"
         end
@@ -152,13 +104,14 @@ class UploadServiceTest < ActiveSupport::TestCase
           assert_equal(317733, @upload.file_size)
           assert_equal("jpg", @upload.file_ext)
           assert_equal("4c71da5638b897aa6da1150e742e2982", @upload.md5)
-          assert(File.exist?(Danbooru.config.storage_manager.file_path(@upload.md5, "jpg", :original)))
-          assert(File.exist?(Danbooru.config.storage_manager.file_path(@upload.md5, "jpg", :preview)))
+          assert_file_exists(@upload, :preview)
+          assert_file_exists(@upload, :original)
         end
       end
 
       context "for pixiv ugoira" do
         setup do
+          skip "Pixiv credentials not configured" unless Sources::Strategies::Pixiv.enabled?
           @source = "http://www.pixiv.net/member_illust.php?mode=medium&illust_id=62247364"
         end
 
@@ -172,8 +125,8 @@ class UploadServiceTest < ActiveSupport::TestCase
           assert_equal(2804, @upload.file_size)
           assert_equal("zip", @upload.file_ext)
           assert_equal("cad1da177ef309bf40a117c17b8eecf5", @upload.md5)
-          assert(File.exist?(Danbooru.config.storage_manager.file_path(@upload.md5, "zip", :original)))
-          assert(File.exist?(Danbooru.config.storage_manager.file_path(@upload.md5, "zip", :large)))
+          assert_file_exists(@upload, :sample)
+          assert_file_exists(@upload, :original)
         end
       end
 
@@ -190,9 +143,9 @@ class UploadServiceTest < ActiveSupport::TestCase
           assert_equal(181309, @upload.file_size)
           assert_equal("jpg", @upload.file_ext)
           assert_equal("93f4dd66ef1eb11a89e56d31f9adc8d0", @upload.md5)
-          assert(File.exist?(Danbooru.config.storage_manager.file_path(@upload.md5, "jpg", :original)))
-          assert(File.exist?(Danbooru.config.storage_manager.file_path(@upload.md5, "jpg", :large)))
-          assert(File.exist?(Danbooru.config.storage_manager.file_path(@upload.md5, "jpg", :preview)))
+          assert_file_exists(@upload, :preview)
+          assert_file_exists(@upload, :sample)
+          assert_file_exists(@upload, :original)
         end
       end
 
@@ -209,8 +162,8 @@ class UploadServiceTest < ActiveSupport::TestCase
           assert_equal("mp4", @upload.file_ext)
           assert_operator(@upload.file_size, :>, 0)
           assert_not_nil(@upload.source)
-          assert(File.exist?(Danbooru.config.storage_manager.file_path(@upload.md5, "mp4", :original)))
-          assert(File.exist?(Danbooru.config.storage_manager.file_path(@upload.md5, "mp4", :preview)))
+          assert_file_exists(@upload, :preview)
+          assert_file_exists(@upload, :original)
         end
       end
 
@@ -237,6 +190,7 @@ class UploadServiceTest < ActiveSupport::TestCase
 
     context "#finish!" do
       setup do
+        skip "Twitter credentials not configured" unless Sources::Strategies::Twitter.enabled?
         CurrentUser.user = travel_to(1.month.ago) do
           FactoryBot.create(:user)
         end
@@ -273,12 +227,6 @@ class UploadServiceTest < ActiveSupport::TestCase
       subject { UploadService::Replacer.new(post: @post, replacement: @replacement) }
 
       context "#process!" do
-        should "create a new upload" do
-          assert_difference(-> { Upload.count }) do
-            as(@user) { subject.process! }
-          end
-        end
-
         should "create a comment" do
           assert_difference(-> { @post.comments.count }) do
             as(@user) { subject.process! }
@@ -329,19 +277,10 @@ class UploadServiceTest < ActiveSupport::TestCase
       end
 
       context "a post with the same file" do
-        should "not raise a duplicate error" do
+        should "raise an error" do
           upload_file("test/files/test.png") do |file|
-            assert_nothing_raised do
+            assert_raises(UploadService::Replacer::Error) do
               as(@user) { @post.replace!(replacement_file: file, replacement_url: "") }
-            end
-          end
-        end
-
-        should "not queue a deletion or log a comment" do
-          upload_file("test/files/test.png") do |file|
-            assert_no_difference(-> { @post.comments.count }) do
-              as(@user) { @post.replace!(replacement_file: file, replacement_url: "") }
-              @post.reload
             end
           end
         end
@@ -350,6 +289,8 @@ class UploadServiceTest < ActiveSupport::TestCase
 
     context "for a twitter source replacement" do
       setup do
+        skip "Twitter credentials not configured" unless Sources::Strategies::Twitter.enabled?
+
         @new_url = "https://pbs.twimg.com/media/B4HSEP5CUAA4xyu.png:orig"
 
         travel_to(1.month.ago) do
@@ -392,10 +333,10 @@ class UploadServiceTest < ActiveSupport::TestCase
       subject { UploadService::Replacer.new(post: @post, replacement: @replacement) }
 
       context "when replacing with its own source" do
-        should "work" do
-          as(@user) { @post.replace!(replacement_url: @post.source) }
-          assert_equal(@post_md5, @post.md5)
-          assert_match(/#{@post_md5}/, @post.file_path)
+        should "raise an error" do
+          assert_raises(UploadService::Replacer::Error) do
+            as(@user) { @post.replace!(replacement_url: @post.source) }
+          end
         end
       end
 
@@ -466,12 +407,6 @@ class UploadServiceTest < ActiveSupport::TestCase
       end
 
       context "#process!" do
-        should "create a new upload" do
-          assert_difference(-> { Upload.count }) do
-            as(@user) { subject.process! }
-          end
-        end
-
         should "create a comment" do
           assert_difference(-> { @post.comments.count }) do
             as(@user) { subject.process! }
@@ -516,6 +451,10 @@ class UploadServiceTest < ActiveSupport::TestCase
       end
 
       context "a post with a pixiv html source" do
+        setup do
+          skip "Pixiv credentials not configured" unless Sources::Strategies::Pixiv.enabled?
+        end
+
         should "replace with the full size image" do
           as(@user) do
             @post.replace!(replacement_url: "https://www.pixiv.net/member_illust.php?mode=medium&illust_id=62247350")
@@ -546,6 +485,8 @@ class UploadServiceTest < ActiveSupport::TestCase
       context "a post that is replaced by a ugoira" do
         should "save the frame data" do
           skip unless MediaFile::Ugoira.videos_enabled?
+          skip "Pixiv credentials not configured" unless Sources::Strategies::Pixiv.enabled?
+
           begin
             as(@user) { @post.replace!(replacement_url: "http://www.pixiv.net/member_illust.php?mode=medium&illust_id=62247364") }
             @post.reload
@@ -566,10 +507,12 @@ class UploadServiceTest < ActiveSupport::TestCase
       context "a post that is replaced to another file then replaced back to the original file" do
         should "not delete the original files" do
           skip unless MediaFile::Ugoira.videos_enabled?
+          skip "Pixiv credentials not configured" unless Sources::Strategies::Pixiv.enabled?
+
           @post.unstub(:queue_delete_files)
 
           # this is called thrice to delete the file for 62247364
-          FileUtils.expects(:rm_f).times(3)
+          #FileUtils.expects(:rm_f).times(3)
 
           as(@user) do
             @post.replace!(replacement_url: "https://www.pixiv.net/member_illust.php?mode=medium&illust_id=62247350")
@@ -594,6 +537,8 @@ class UploadServiceTest < ActiveSupport::TestCase
 
       context "two posts that have had their files swapped" do
         setup do
+          skip "Pixiv credentials not configured" unless Sources::Strategies::Pixiv.enabled?
+
           as(@user) do
             @post1 = FactoryBot.create(:post)
             @post2 = FactoryBot.create(:post)
@@ -636,6 +581,8 @@ class UploadServiceTest < ActiveSupport::TestCase
 
       context "a post with notes" do
         setup do
+          skip "Pixiv credentials not configured" unless Sources::Strategies::Pixiv.enabled?
+
           Note.any_instance.stubs(:merge_version?).returns(false)
 
           as(@user) do
@@ -685,26 +632,19 @@ class UploadServiceTest < ActiveSupport::TestCase
     end
 
     context "automatic tagging" do
-      setup do
-        @build_service = ->(file) { subject.new(file: file)}
-      end
-
       should "tag animated png files" do
-        service = @build_service.call(upload_file("test/files/apng/normal_apng.png"))
-        upload = service.start!
-        assert_match(/animated_png/, upload.tag_string)
+        upload = UploadService.new(file: upload_file("test/files/apng/normal_apng.png")).start!
+        assert_match(/animated_png/, upload.post.tag_string)
       end
 
       should "tag animated gif files" do
-        service = @build_service.call(upload_file("test/files/test-animated-86x52.gif"))
-        upload = service.start!
-        assert_match(/animated_gif/, upload.tag_string)
+        upload = UploadService.new(file: upload_file("test/files/test-animated-86x52.gif")).start!
+        assert_match(/animated_gif/, upload.post.tag_string)
       end
 
       should "not tag static gif files" do
-        service = @build_service.call(upload_file("test/files/test-static-32x32.gif"))
-        upload = service.start!
-        assert_no_match(/animated_gif/, upload.tag_string)
+        upload = UploadService.new(file: upload_file("test/files/test-static-32x32.gif")).start!
+        assert_no_match(/animated_gif/, upload.post.tag_string)
       end
     end
 
@@ -777,7 +717,7 @@ class UploadServiceTest < ActiveSupport::TestCase
 
         assert_equal(true, upload.valid?)
         assert_equal("s", upload.rating)
-        assert_equal("rating:safe blah ", upload.tag_string)
+        assert_equal("rating:safe blah", upload.tag_string)
 
         assert_equal("s", upload.post.rating)
         assert_equal("blah", upload.post.tag_string)
@@ -892,20 +832,6 @@ class UploadServiceTest < ActiveSupport::TestCase
       end
     end
 
-    context "for a pixiv ugoira" do
-      setup do
-        @upload = FactoryBot.create(:ugoira_upload, file_size: 1000, md5: "12345", file_ext: "jpg", image_width: 100, image_height: 100, context: UGOIRA_CONTEXT)
-      end
-
-      should "create a post" do
-        assert_difference(-> { PixivUgoiraFrameData.count }) do
-          post = subject.new({}).create_post_from_upload(@upload)
-          assert_equal([], post.errors.full_messages)
-          assert_not_nil(post.id)
-        end
-      end
-    end
-
     context "for nijie" do
       should "record the canonical source" do
         page_url = "https://nijie.info/view.php?id=728995"
@@ -968,31 +894,31 @@ class UploadServiceTest < ActiveSupport::TestCase
 
     should "delete unused files after deleting the upload" do
       @upload = as(@user) { UploadService::Preprocessor.new(file: upload_file("test/files/test.jpg")).start! }
-      assert(File.exist?(Danbooru.config.storage_manager.file_path(@upload.md5, "jpg", :original)))
+      assert_file_exists(@upload, :original)
 
       @upload.destroy!
-      refute(File.exist?(Danbooru.config.storage_manager.file_path(@upload.md5, "jpg", :original)))
+      assert_file_does_not_exist(@upload, :original)
     end
 
     should "not delete files that are still in use by a post" do
       @upload = as(@user) { UploadService.new(file: upload_file("test/files/test.jpg")).start! }
-      assert(File.exist?(Danbooru.config.storage_manager.file_path(@upload.md5, "jpg", :original)))
+      assert_file_exists(@upload, :original)
 
       @upload.destroy!
-      assert(File.exist?(Danbooru.config.storage_manager.file_path(@upload.md5, "jpg", :original)))
+      assert_file_exists(@upload, :original)
     end
 
     should "not delete files if they're still in use by another upload" do
       @upload1 = as(@user) { UploadService::Preprocessor.new(file: upload_file("test/files/test.jpg")).start! }
       @upload2 = as(@user) { UploadService::Preprocessor.new(file: upload_file("test/files/test.jpg")).start! }
       assert_equal(@upload1.md5, @upload2.md5)
-      assert(File.exist?(Danbooru.config.storage_manager.file_path(@upload1.md5, "jpg", :original)))
+      assert_file_exists(@upload1, :original)
 
       @upload1.destroy!
-      assert(File.exist?(Danbooru.config.storage_manager.file_path(@upload1.md5, "jpg", :original)))
+      assert_file_exists(@upload1, :original)
 
       @upload2.destroy!
-      refute(File.exist?(Danbooru.config.storage_manager.file_path(@upload2.md5, "jpg", :original)))
+      assert_file_does_not_exist(@upload2, :original)
     end
 
     should "not delete files that were replaced after upload and are still pending deletion" do
@@ -1005,15 +931,22 @@ class UploadServiceTest < ActiveSupport::TestCase
       # after replacement the uploaded file is no longer in use, but it shouldn't be
       # deleted yet. it should only be deleted by the replacer after the grace period.
       @upload.destroy!
-      assert(File.exist?(Danbooru.config.storage_manager.file_path(@upload.md5, "jpg", :original)))
+      assert_file_exists(@upload, :original)
 
       travel (PostReplacement::DELETION_GRACE_PERIOD + 1).days
       perform_enqueued_jobs
-      refute(File.exist?(Danbooru.config.storage_manager.file_path(@upload.md5, "jpg", :original)))
+      assert_file_does_not_exist(@upload, :original)
     end
 
     should "work on uploads without a file" do
       @upload = as(@user) { UploadService.new(source: "http://14903gf0vm3g134yjq3n535yn3n.com/does_not_exist.jpg").start! }
+
+      assert(@upload.is_errored?)
+      assert_difference("Upload.count", -1) { @upload.destroy! }
+    end
+
+    should "work on uploads with an invalid file" do
+      @upload = as(@user) { UploadService.new(file: upload_file("test/files/test-empty.bin")).start! }
 
       assert(@upload.is_errored?)
       assert_difference("Upload.count", -1) { @upload.destroy! }

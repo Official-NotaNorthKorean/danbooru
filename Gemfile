@@ -12,9 +12,6 @@ gem 'ruby-vips'
 gem 'net-sftp'
 gem 'diff-lcs', :require => "diff/lcs/array"
 gem 'bcrypt', :require => "bcrypt"
-gem 'capistrano', '~> 3.10'
-gem 'capistrano-rails'
-gem 'capistrano-rbenv'
 gem 'rubyzip', :require => "zip"
 gem 'stripe'
 gem 'aws-sdk-sqs', '~> 1'
@@ -56,21 +53,13 @@ gem 'puma-metrics'
 gem 'puma_worker_killer'
 gem "rack-timeout", require: "rack/timeout/base"
 gem "parallel"
-
-group :production do
-  gem 'unicorn', :platforms => :ruby
-  gem 'capistrano3-unicorn'
-end
-
-group :production do
-  gem 'unicorn-worker-killer'
-  gem 'capistrano-deploytags', '~> 1.0.0', require: false
-end
+gem "pry-byebug"
+gem "pry-rails"
 
 group :development do
   gem 'rubocop', require: false
   gem 'rubocop-rails', require: false
-  #gem 'meta_request'
+  gem 'meta_request'
   gem 'rack-mini-profiler'
   gem 'stackprof'
   gem 'flamegraph'
@@ -81,8 +70,6 @@ group :development do
 end
 
 group :development, :test do
-  gem 'pry-byebug'
-  gem 'pry-rails'
   gem 'listen'
   gem 'solargraph'
 end

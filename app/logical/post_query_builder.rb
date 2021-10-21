@@ -37,7 +37,7 @@ class PostQueryBuilder
     ordpool note comment commentary id rating locked source status filetype
     disapproved parent child search embedded md5 width height mpixels ratio
     score favcount filesize date age order limit tagcount pixiv_id pixiv
-    unaliased exif
+    unaliased exif duration
   ] + COUNT_METATAGS + COUNT_METATAG_SYNONYMS + CATEGORY_COUNT_METATAGS
 
   ORDER_METATAGS = %w[
@@ -55,6 +55,7 @@ class PostQueryBuilder
     portrait landscape
     filesize filesize_asc
     tagcount tagcount_asc
+    duration duration_asc
     rank
     curated
     modqueue
@@ -106,12 +107,10 @@ class PostQueryBuilder
     optional_tags += (matched_optional_wildcard_tags.empty? && !optional_wildcard_tags.empty?) ? optional_wildcard_tags.map(&:name) : matched_optional_wildcard_tags
     optional_tags += (matched_required_wildcard_tags.empty? && !required_wildcard_tags.empty?) ? required_wildcard_tags.map(&:name) : matched_required_wildcard_tags
 
-    tsquery << "!(#{negated_tags.sort.uniq.map(&:to_escaped_for_tsquery).join(" | ")})" if negated_tags.present?
-    tsquery << "(#{optional_tags.sort.uniq.map(&:to_escaped_for_tsquery).join(" | ")})" if optional_tags.present?
-    tsquery << "(#{required_tags.sort.uniq.map(&:to_escaped_for_tsquery).join(" & ")})" if required_tags.present?
-
-    return relation if tsquery.empty?
-    relation.where("posts.tag_index @@ to_tsquery('danbooru', E?)", tsquery.join(" & "))
+    relation = relation.where_array_includes_all("string_to_array(posts.tag_string, ' ')", required_tags) if required_tags.present?
+    relation = relation.where_array_includes_any("string_to_array(posts.tag_string, ' ')", optional_tags) if optional_tags.present?
+    relation = relation.where_array_includes_none("string_to_array(posts.tag_string, ' ')", negated_tags) if negated_tags.present?
+    relation
   end
 
   def metatags_match(metatags, relation)
@@ -154,6 +153,8 @@ class PostQueryBuilder
       attribute_matches(value, :pixiv_id)
     when "tagcount"
       attribute_matches(value, :tag_count)
+    when "duration"
+      attribute_matches(value, "media_assets.duration", :float).joins(:media_asset)
     when "status"
       status_matches(value)
     when "parent"
@@ -162,8 +163,6 @@ class PostQueryBuilder
       child_matches(value)
     when "rating"
       Post.where(rating: value.first.downcase)
-    when "locked"
-      locked_matches(value)
     when "embedded"
       embedded_matches(value)
     when "source"
@@ -231,8 +230,7 @@ class PostQueryBuilder
   end
 
   def tags_include(*tags)
-    query = tags.map(&:to_escaped_for_tsquery).join(" & ")
-    Post.where("posts.tag_index @@ to_tsquery('danbooru', E?)", query)
+    Post.where_array_includes_all("string_to_array(posts.tag_string, ' ')", tags)
   end
 
   def unaliased_matches(tag)
@@ -430,8 +428,7 @@ class PostQueryBuilder
     favuser = User.find_by_name(username)
 
     if favuser.present? && Pundit.policy!(current_user, favuser).can_see_favorites?
-      favorites = Favorite.from("favorites_#{favuser.id % 100} AS favorites").where(user: favuser)
-      Post.where(id: favorites.select(:post_id))
+      Post.where(id: favuser.favorites.select(:post_id))
     else
       Post.none
     end
@@ -441,7 +438,7 @@ class PostQueryBuilder
     user = User.find_by_name(username)
 
     if user.present? && Pundit.policy!(current_user, user).can_see_favorites?
-      Post.joins(:favorites).merge(Favorite.for_user(user.id)).order("favorites.id DESC")
+      Post.joins(:favorites).merge(Favorite.where(user: user)).order("favorites.id DESC")
     else
       Post.none
     end
@@ -467,19 +464,6 @@ class PostQueryBuilder
       Post.where(artist_commentary: ArtistCommentary.untranslated)
     else
       Post.where(artist_commentary: ArtistCommentary.text_matches(query))
-    end
-  end
-
-  def locked_matches(query)
-    case query.downcase
-    when "rating"
-      Post.where(is_rating_locked: true)
-    when "note", "notes"
-      Post.where(is_note_locked: true)
-    when "status"
-      Post.where(is_status_locked: true)
-    else
-      Post.none
     end
   end
 
@@ -521,11 +505,59 @@ class PostQueryBuilder
       relation = search_order(relation, "created_at_desc")
     elsif find_metatag(:order) == "custom"
       relation = search_order_custom(relation, select_metatags(:id).map(&:value))
+    elsif has_metatag?(:ordfav)
+      # no-op
     else
       relation = search_order(relation, find_metatag(:order))
     end
 
     relation
+  end
+
+  def paginated_posts(page, small_search_threshold: Danbooru.config.small_search_threshold.to_i, **options)
+    posts = build.paginate(page, **options)
+    posts = optimize_search(posts, small_search_threshold)
+    posts.load
+  end
+
+  # XXX This is an ugly hack to try to deal with slow searches. By default,
+  # Postgres wants to do an index scan down the post id index for large
+  # order:id searches, and a bitmap scan on the tag index for small searches.
+  # The problem is that Postgres can't always tell whether a search is large or
+  # small. For large mutually-exclusive tags like 1girl + multiple_girls,
+  # Postgres assumes the search is large when actually it's small. For small
+  # tags, Postgres sometimes assumes tags in the 10k-50k range are large enough
+  # for a post id index scan, when in reality a tag index bitmap scan would be
+  # better.
+  def optimize_search(relation, small_search_threshold)
+    return relation unless small_search_threshold.present?
+    return relation unless relation.order_values == ["posts.id DESC"]
+
+    if post_count.nil?
+      # If post_count is nil, then the search took too long to count and we don't
+      # know whether it's large or small. First we try it normally assuming it's
+      # large, then if that times out we try again assuming it's small.
+      posts = Post.with_timeout(1000) { relation.load }
+      posts = small_search(relation) if posts.nil?
+    elsif post_count <= small_search_threshold
+      # Otherwise if we know the search is small, then treat it as a small search.
+      posts = small_search(relation)
+    else
+      # Otherwise if we know it's large, treat it normally
+      posts = relation
+    end
+
+    posts
+  end
+
+  # Perform a search, forcing Postgres to do a bitmap scan on the tags index.
+  # https://www.postgresql.org/docs/current/runtime-config-query.html
+  def small_search(relation)
+    Post.transaction do
+      Post.connection.execute("SET LOCAL enable_seqscan = off")
+      Post.connection.execute("SET LOCAL enable_indexscan = off")
+      relation.load
+    end
   end
 
   def search_order(relation, order)
@@ -627,10 +659,18 @@ class PostQueryBuilder
     when "tagcount_asc"
       relation = relation.order("posts.tag_count ASC")
 
-    when /(#{TagCategory.short_name_regex})tags(?:\Z|_desc)/
+    when "duration", "duration_desc"
+      relation = relation.joins(:media_asset).order("media_assets.duration DESC NULLS LAST, posts.id DESC")
+
+    when "duration_asc"
+      relation = relation.joins(:media_asset).order("media_assets.duration ASC NULLS LAST, posts.id ASC")
+
+    # artags_desc, copytags_desc, chartags_desc, gentags_desc, metatags_desc
+    when /(#{TagCategory.short_name_list.join("|")})tags(?:\Z|_desc)/
       relation = relation.order("posts.tag_count_#{TagCategory.short_name_mapping[$1]} DESC")
 
-    when /(#{TagCategory.short_name_regex})tags_asc/
+    # artags_asc, copytags_asc, chartags_asc, gentags_asc, metatags_asc
+    when /(#{TagCategory.short_name_list.join("|")})tags_asc/
       relation = relation.order("posts.tag_count_#{TagCategory.short_name_mapping[$1]} ASC")
 
     when "rank"
@@ -899,6 +939,10 @@ class PostQueryBuilder
   end
 
   concerning :CountMethods do
+    def post_count
+      fast_count
+    end
+
     # Return an estimate of the number of posts returned by the search.  By
     # default, we try to use an estimated or cached count before doing an exact
     # count.
@@ -910,8 +954,8 @@ class PostQueryBuilder
     def fast_count(timeout: 1_000, estimate_count: true, skip_cache: false)
       count = nil
       count = estimated_count if estimate_count
-      count = cached_count if count.nil? && !skip_cache
-      count = exact_count(timeout) if count.nil?
+      count = cached_count(timeout) if count.nil? && !skip_cache
+      count = exact_count(timeout) if count.nil? && skip_cache
       count
     end
 
@@ -922,6 +966,20 @@ class PostQueryBuilder
         Tag.find_by(name: tags.first.name).try(:post_count)
       elsif is_metatag?(:rating)
         estimated_row_count
+      elsif is_metatag?(:pool) || is_metatag?(:ordpool)
+        name = find_metatag(:pool, :ordpool)
+        Pool.find_by_name(name)&.post_count || 0
+      elsif is_metatag?(:fav) || is_metatag?(:ordfav)
+        name = find_metatag(:fav, :ordfav)
+        user = User.find_by_name(name)
+
+        if user.nil?
+          0
+        elsif Pundit.policy!(current_user, user).can_see_favorites?
+          user.favorite_count
+        else
+          nil
+        end
       end
     end
 
@@ -930,24 +988,16 @@ class PostQueryBuilder
       ExplainParser.new(build).row_count
     end
 
-    def cached_count
-      Cache.get(count_cache_key)
+    def cached_count(timeout, duration: 5.minutes)
+      Cache.get(count_cache_key, duration) do
+        exact_count(timeout)
+      end
     end
 
     def exact_count(timeout)
-      count = Post.with_timeout(timeout, nil) do
+      Post.with_timeout(timeout) do
         build.count
       end
-
-      set_cached_count(count) if count.present?
-      count
-    rescue Post::SearchError
-      nil
-    end
-
-    def set_cached_count(count)
-      expiry = count.seconds.clamp(3.minutes, 20.hours).to_i
-      Cache.put(count_cache_key, count, expiry)
     end
 
     def count_cache_key
@@ -1095,5 +1145,5 @@ class PostQueryBuilder
     end
   end
 
-  memoize :split_query
+  memoize :split_query, :post_count
 end

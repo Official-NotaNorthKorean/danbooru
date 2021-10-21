@@ -9,8 +9,8 @@ class Dmail < ApplicationRecord
   has_many :moderation_reports, as: :model, dependent: :destroy
 
   before_create :autoreport_spam
-  after_save :update_unread_dmail_count
   after_destroy :update_unread_dmail_count
+  after_save :update_unread_dmail_count
   after_commit :send_email, on: :create
 
   deletable
@@ -99,7 +99,8 @@ class Dmail < ApplicationRecord
     def search(params)
       q = search_attributes(params, :id, :created_at, :updated_at, :is_read, :is_deleted, :title, :body, :to, :from)
       q = q.text_attribute_matches(:title, params[:title_matches])
-      q = q.text_attribute_matches(:body, params[:message_matches], index_column: :message_index)
+      q = q.text_attribute_matches(:body, params[:body_matches])
+      q = q.text_attribute_matches([:title, :body], params[:message_matches])
 
       q = q.folder_matches(params[:folder])
 

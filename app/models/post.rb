@@ -1,14 +1,12 @@
 class Post < ApplicationRecord
-  class ApprovalError < StandardError; end
-  class DisapprovalError < StandardError; end
   class RevertError < StandardError; end
-  class SearchError < StandardError; end
   class DeletionError < StandardError; end
-  class TimeoutError < StandardError; end
 
   # Tags to copy when copying notes.
   NOTE_COPY_TAGS = %w[translated partially_translated check_translation translation_request reverse_translation
                       annotated partially_annotated check_annotation annotation_request]
+
+  self.ignored_columns = [:pool_string, :fav_string]
 
   deletable
 
@@ -27,11 +25,9 @@ class Post < ApplicationRecord
   validate :has_copyright_tag
   validate :has_enough_tags
   validate :post_is_not_its_own_parent
-  validate :updater_can_change_rating
   validate :uploader_is_not_limited, on: :create
   before_save :update_tag_post_counts
   before_save :set_tag_counts
-  before_save :create_mod_action_for_lock_change
   before_create :autoban
   after_save :create_version
   after_save :update_parent_on_save
@@ -44,7 +40,7 @@ class Post < ApplicationRecord
   has_one :media_asset, foreign_key: :md5, primary_key: :md5
   has_one :upload, :dependent => :destroy
   has_one :artist_commentary, :dependent => :destroy
-  has_one :pixiv_ugoira_frame_data, :class_name => "PixivUgoiraFrameData", :dependent => :destroy
+  has_one :pixiv_ugoira_frame_data, class_name: "PixivUgoiraFrameData", foreign_key: :md5, primary_key: :md5
   has_many :flags, :class_name => "PostFlag", :dependent => :destroy
   has_many :appeals, :class_name => "PostAppeal", :dependent => :destroy
   has_many :votes, :class_name => "PostVote", :dependent => :destroy
@@ -53,7 +49,7 @@ class Post < ApplicationRecord
   has_many :children, -> {order("posts.id")}, :class_name => "Post", :foreign_key => "parent_id"
   has_many :approvals, :class_name => "PostApproval", :dependent => :destroy
   has_many :disapprovals, :class_name => "PostDisapproval", :dependent => :destroy
-  has_many :favorites
+  has_many :favorites, dependent: :destroy
   has_many :favorited_users, through: :favorites, source: :user
   has_many :replacements, class_name: "PostReplacement", :dependent => :destroy
 
@@ -103,16 +99,6 @@ class Post < ApplicationRecord
       Post.delete_files(id, md5, file_ext, force: true)
     end
 
-    def distribute_files(file, sample_file, preview_file)
-      storage_manager.store_file(file, self, :original)
-      storage_manager.store_file(sample_file, self, :large) if sample_file.present?
-      storage_manager.store_file(preview_file, self, :preview) if preview_file.present?
-
-      backup_storage_manager.store_file(file, self, :original)
-      backup_storage_manager.store_file(sample_file, self, :large) if sample_file.present?
-      backup_storage_manager.store_file(preview_file, self, :preview) if preview_file.present?
-    end
-
     def backup_storage_manager
       Danbooru.config.backup_storage_manager
     end
@@ -125,12 +111,12 @@ class Post < ApplicationRecord
       storage_manager.open_file(self, type)
     end
 
-    def tagged_file_url
-      storage_manager.file_url(self, :original, tagged_filenames: !CurrentUser.user.disable_tagged_filenames?)
+    def tagged_file_url(tagged_filenames: !CurrentUser.user.disable_tagged_filenames?)
+      storage_manager.file_url(self, :original, tagged_filenames: tagged_filenames)
     end
 
-    def tagged_large_file_url
-      storage_manager.file_url(self, :large, tagged_filenames: !CurrentUser.user.disable_tagged_filenames?)
+    def tagged_large_file_url(tagged_filenames: !CurrentUser.user.disable_tagged_filenames?)
+      storage_manager.file_url(self, :large, tagged_filenames: tagged_filenames)
     end
 
     def file_url
@@ -143,18 +129,6 @@ class Post < ApplicationRecord
 
     def preview_file_url
       storage_manager.file_url(self, :preview)
-    end
-
-    def file_path
-      storage_manager.file_path(self, file_ext, :original)
-    end
-
-    def large_file_path
-      storage_manager.file_path(self, file_ext, :large)
-    end
-
-    def preview_file_path
-      storage_manager.file_path(self, file_ext, :preview)
     end
 
     def crop_file_url
@@ -185,28 +159,12 @@ class Post < ApplicationRecord
       file_ext =~ /jpg|gif|png/i
     end
 
-    def is_png?
-      file_ext =~ /png/i
-    end
-
-    def is_gif?
-      file_ext =~ /gif/i
-    end
-
     def is_flash?
       file_ext =~ /swf/i
     end
 
-    def is_webm?
-      file_ext =~ /webm/i
-    end
-
-    def is_mp4?
-      file_ext =~ /mp4/i
-    end
-
     def is_video?
-      is_webm? || is_mp4?
+      file_ext.in?(%w[webm mp4])
     end
 
     def is_ugoira?
@@ -293,19 +251,7 @@ class Post < ApplicationRecord
     end
 
     def is_approvable?(user = CurrentUser.user)
-      !is_status_locked? && !is_active? && uploader != user
-    end
-
-    def flag!(reason, is_deletion: false)
-      flag = flags.create(reason: reason, is_deletion: is_deletion, creator: CurrentUser.user)
-
-      if flag.errors.any?
-        raise PostFlag::Error, flag.errors.full_messages.join("; ")
-      end
-    end
-
-    def approve!(approver = CurrentUser.user)
-      approvals.create(user: approver)
+      !is_active? && uploader != user
     end
 
     def disapproved_by?(user)
@@ -467,7 +413,6 @@ class Post < ApplicationRecord
       normalized_tags = filter_metatags(normalized_tags)
       normalized_tags = TagAlias.to_aliased(normalized_tags)
       normalized_tags = remove_negated_tags(normalized_tags)
-      normalized_tags = %w[tagme] if normalized_tags.empty?
       normalized_tags = add_automatic_tags(normalized_tags)
       normalized_tags = remove_invalid_tags(normalized_tags)
       normalized_tags = Tag.convert_cosplay_tags(normalized_tags)
@@ -482,7 +427,7 @@ class Post < ApplicationRecord
       invalid_tags = tag_names.map { |name| Tag.new(name: name) }.select { |tag| tag.invalid?(:name) }
 
       invalid_tags.each do |tag|
-        tag.errors.messages.each do |attribute, messages|
+        tag.errors.messages.each do |_attribute, messages|
           warnings.add(:base, "Couldn't add tag: #{messages.join(';')}")
         end
       end
@@ -498,7 +443,13 @@ class Post < ApplicationRecord
     end
 
     def add_automatic_tags(tags)
-      tags -= %w[incredibly_absurdres absurdres highres lowres huge_filesize flash]
+      tags -= %w[incredibly_absurdres absurdres highres lowres flash video ugoira animated_gif animated_png exif_rotation non-repeating_animation]
+
+      if tags.size >= 30
+        tags -= ["tagme"]
+      elsif tags.empty?
+        tags << "tagme"
+      end
 
       if image_width >= 10_000 || image_height >= 10_000
         tags << "incredibly_absurdres"
@@ -515,14 +466,8 @@ class Post < ApplicationRecord
 
       if image_width >= 1024 && image_width.to_f / image_height >= 4
         tags << "wide_image"
-        tags << "long_image"
       elsif image_height >= 1024 && image_height.to_f / image_width >= 4
         tags << "tall_image"
-        tags << "long_image"
-      end
-
-      if file_size >= 10.megabytes
-        tags << "huge_filesize"
       end
 
       if is_flash?
@@ -537,13 +482,15 @@ class Post < ApplicationRecord
         tags << "ugoira"
       end
 
-      if !is_gif?
-        tags -= ["animated_gif"]
-      end
+      # Allow only Flash files to be manually tagged as `animated`; GIFs, PNGs, videos, and ugoiras are automatically tagged.
+      tags -= ["animated"] unless is_flash?
+      tags << "animated" if media_asset.is_animated?
+      tags << "animated_gif" if media_asset.is_animated_gif?
+      tags << "animated_png" if media_asset.is_animated_png?
 
-      if !is_png?
-        tags -= ["animated_png"]
-      end
+      tags << "greyscale" if media_asset.is_greyscale?
+      tags << "exif_rotation" if media_asset.is_rotated?
+      tags << "non-repeating_animation" if media_asset.is_non_repeating_animation?
 
       tags
     end
@@ -566,7 +513,7 @@ class Post < ApplicationRecord
         when /^newpool:(.+)$/i
           pool = Pool.find_by_name($1)
           if pool.nil?
-            pool = Pool.create(name: $1, description: "This pool was automatically generated")
+            Pool.create(name: $1, description: "This pool was automatically generated")
           end
         end
       end
@@ -575,7 +522,7 @@ class Post < ApplicationRecord
     end
 
     def filter_metatags(tags)
-      @pre_metatags, tags = tags.partition {|x| x =~ /\A(?:rating|parent|-parent|-?locked):/i}
+      @pre_metatags, tags = tags.partition {|x| x =~ /\A(?:rating|parent|-parent):/i}
       tags = apply_categorization_metatags(tags)
       @post_metatags, tags = tags.partition {|x| x =~ /\A(?:-pool|pool|newpool|fav|-fav|child|-child|-favgroup|favgroup|upvote|downvote|status|-status|disapproved):/i}
       apply_pre_metatags
@@ -600,29 +547,29 @@ class Post < ApplicationRecord
         case tag
         when /^-pool:(\d+)$/i
           pool = Pool.find_by_id($1.to_i)
-          remove_pool!(pool) if pool
+          pool&.remove!(self)
 
         when /^-pool:(.+)$/i
           pool = Pool.find_by_name($1)
-          remove_pool!(pool) if pool
+          pool&.remove!(self)
 
         when /^pool:(\d+)$/i
           pool = Pool.find_by_id($1.to_i)
-          add_pool!(pool) if pool
+          pool&.add!(self)
 
         when /^pool:(.+)$/i
           pool = Pool.find_by_name($1)
-          add_pool!(pool) if pool
+          pool&.add!(self)
 
         when /^newpool:(.+)$/i
           pool = Pool.find_by_name($1)
-          add_pool!(pool) if pool
+          pool&.add!(self)
 
         when /^fav:(.+)$/i
-          add_favorite(CurrentUser.user)
+          Favorite.create(post: self, user: CurrentUser.user)
 
         when /^-fav:(.+)$/i
-          remove_favorite(CurrentUser.user)
+          Favorite.destroy_by(post: self, user: CurrentUser.user)
 
         when /^(up|down)vote:(.+)$/i
           score = ($1 == "up" ? 1 : -1)
@@ -695,15 +642,6 @@ class Post < ApplicationRecord
         when /^rating:([qse])/i
           self.rating = $1
 
-        when /^(-?)locked:notes?$/i
-          self.is_note_locked = ($1 != "-") if CurrentUser.is_builder?
-
-        when /^(-?)locked:rating$/i
-          self.is_rating_locked = ($1 != "-") if CurrentUser.is_builder?
-
-        when /^(-?)locked:status$/i
-          self.is_status_locked = ($1 != "-") if CurrentUser.is_admin?
-
         end
       end
     end
@@ -741,54 +679,9 @@ class Post < ApplicationRecord
   end
 
   module FavoriteMethods
-    def clean_fav_string?
-      true
-    end
-
-    def clean_fav_string!
-      array = fav_string.split.uniq
-      self.fav_string = array.join(" ")
-      self.fav_count = array.size
-      update_column(:fav_string, fav_string)
-      update_column(:fav_count, fav_count)
-    end
-
     def favorited_by?(user)
       return false if user.is_anonymous?
       Favorite.exists?(post: self, user: user)
-    end
-
-    def append_user_to_fav_string(user_id)
-      update_column(:fav_string, (fav_string + " fav:#{user_id}").strip)
-      clean_fav_string! if clean_fav_string?
-    end
-
-    def add_favorite(user)
-      add_favorite!(user)
-      true
-    rescue Favorite::Error
-      false
-    end
-
-    def add_favorite!(user)
-      Favorite.add(post: self, user: user)
-      vote!(1, user)
-    end
-
-    def delete_user_from_fav_string(user_id)
-      update_column(:fav_string, fav_string.gsub(/(?:\A| )fav:#{user_id}(?:\Z| )/, " ").strip)
-    end
-
-    def remove_favorite!(user)
-      Favorite.remove(post: self, user: user)
-      unvote!(user)
-    end
-
-    def remove_favorite(user)
-      remove_favorite!(user)
-      true
-    rescue Favorite::Error
-      false
     end
 
     # Users who publicly favorited this post, ordered by time of favorite.
@@ -800,13 +693,6 @@ class Post < ApplicationRecord
 
     def favorite_groups
       FavoriteGroup.for_post(id)
-    end
-
-    def remove_from_favorites
-      Favorite.where(post_id: id).delete_all
-      user_ids = fav_string.scan(/\d+/)
-      User.where(:id => user_ids).update_all("favorite_count = favorite_count - 1")
-      PostVote.where(post_id: id).delete_all
     end
 
     def remove_from_fav_groups
@@ -823,35 +709,6 @@ class Post < ApplicationRecord
 
     def has_active_pools?
       pools.undeleted.present?
-    end
-
-    def belongs_to_pool?(pool)
-      pool_string =~ /(?:\A| )pool:#{pool.id}(?:\Z| )/
-    end
-
-    def belongs_to_pool_with_id?(pool_id)
-      pool_string =~ /(?:\A| )pool:#{pool_id}(?:\Z| )/
-    end
-
-    def add_pool!(pool, force = false)
-      return if belongs_to_pool?(pool)
-      return if pool.is_deleted? && !force
-
-      with_lock do
-        self.pool_string = "#{pool_string} pool:#{pool.id}".strip
-        update_column(:pool_string, pool_string) unless new_record?
-        pool.add!(self)
-      end
-    end
-
-    def remove_pool!(pool)
-      return unless belongs_to_pool?(pool)
-
-      with_lock do
-        self.pool_string = pool_string.gsub(/(?:\A| )pool:#{pool.id}(?:\Z| )/, " ").strip
-        update_column(:pool_string, pool_string) unless new_record?
-        pool.remove!(self)
-      end
     end
 
     def remove_from_all_pools
@@ -932,8 +789,8 @@ class Post < ApplicationRecord
 
       transaction do
         favorites.each do |fav|
-          remove_favorite!(fav.user)
-          parent.add_favorite(fav.user)
+          fav.destroy!
+          Favorite.create(post: parent, user: fav.user)
         end
       end
 
@@ -954,11 +811,6 @@ class Post < ApplicationRecord
 
   module DeletionMethods
     def expunge!
-      if is_status_locked?
-        errors.add(:is_status_locked, "; cannot delete post")
-        return false
-      end
-
       transaction do
         Post.without_timeout do
           ModAction.log("permanently deleted post ##{id} (md5=#{md5})", :post_permanent_delete)
@@ -967,7 +819,6 @@ class Post < ApplicationRecord
           decrement_tag_post_counts
           remove_from_all_pools
           remove_from_fav_groups
-          remove_from_favorites
           destroy
           update_parent_on_destroy
         end
@@ -1115,7 +966,7 @@ class Post < ApplicationRecord
         "tags" => tag_string,
         "height" => image_height,
         "file_size" => file_size,
-        "id" => id
+        "id" => id,
       }
 
       if visible?
@@ -1190,7 +1041,7 @@ class Post < ApplicationRecord
 
     def with_flag_stats
       relation = left_outer_joins(:flags).group(:id).select("posts.*")
-      relation = relation.select("COUNT(post_flags.id) AS flag_count")
+      relation.select("COUNT(post_flags.id) AS flag_count")
       relation
     end
 
@@ -1265,7 +1116,7 @@ class Post < ApplicationRecord
     end
 
     def raw_tag_match(tag)
-      where("posts.tag_index @@ to_tsquery('danbooru', E?)", tag.to_escaped_for_tsquery)
+      Post.where_array_includes_all("string_to_array(posts.tag_string, ' ')", [tag])
     end
 
     # Perform a tag search as an anonymous user. No tag limit is enforced.
@@ -1299,12 +1150,11 @@ class Post < ApplicationRecord
         :id, :created_at, :updated_at, :rating, :source, :pixiv_id, :fav_count,
         :score, :up_score, :down_score, :md5, :file_ext, :file_size, :image_width,
         :image_height, :tag_count, :has_children, :has_active_children,
-        :is_note_locked, :is_rating_locked, :is_status_locked, :is_pending,
-        :is_flagged, :is_deleted, :is_banned, :last_comment_bumped_at,
-        :last_commented_at, :last_noted_at, :uploader_ip_addr,
-        :uploader, :approver, :parent, :upload, :artist_commentary,
-        :flags, :appeals, :notes, :comments, :children, :approvals,
-        :replacements, :pixiv_ugoira_frame_data
+        :is_pending, :is_flagged, :is_deleted, :is_banned,
+        :last_comment_bumped_at, :last_commented_at, :last_noted_at,
+        :uploader_ip_addr, :uploader, :approver, :parent, :upload,
+        :artist_commentary, :flags, :appeals, :notes, :comments, :children,
+        :approvals, :replacements, :pixiv_ugoira_frame_data
       )
 
       if params[:tags].present?
@@ -1344,7 +1194,21 @@ class Post < ApplicationRecord
         ModAction.log("<@#{user.name}> regenerated IQDB for post ##{id}", :post_regenerate_iqdb, user)
       else
         media_file = MediaFile.open(file, frame_data: pixiv_ugoira_frame_data&.data.to_a)
-        UploadService::Utils.process_resizes(self, nil, id, media_file: media_file)
+        media_asset.distribute_files!(media_file)
+
+        update!(
+          image_width: media_file.width,
+          image_height: media_file.height,
+          file_size: media_file.file_size,
+          file_ext: media_file.file_ext
+        )
+
+        media_asset.update!(
+          image_width: media_file.width,
+          image_height: media_file.height,
+          file_size: media_file.file_size,
+          file_ext: media_file.file_ext
+        )
 
         purge_cached_urls!
         update_iqdb
@@ -1354,7 +1218,11 @@ class Post < ApplicationRecord
     end
 
     def purge_cached_urls!
-      urls = [preview_file_url, large_file_url]
+      urls = [
+        preview_file_url, crop_file_url, large_file_url, file_url,
+        tagged_file_url(tagged_filenames: true), tagged_large_file_url(tagged_filenames: true),
+      ]
+
       CloudflareService.new.purge_cache(urls)
     end
   end
@@ -1375,13 +1243,6 @@ class Post < ApplicationRecord
     def post_is_not_its_own_parent
       if !new_record? && id == parent_id
         errors.add(:base, "Post cannot have itself as a parent")
-      end
-    end
-
-    def updater_can_change_rating
-      # Don't forbid changes if the rating lock was just now set in the same update.
-      if rating_changed? && is_rating_locked? && !is_rating_locked_changed?
-        errors.add(:rating, "is locked and cannot be changed. Unlock the post first.")
       end
     end
 
@@ -1511,40 +1372,16 @@ class Post < ApplicationRecord
     save
   end
 
-  def create_mod_action_for_lock_change
-    if is_note_locked != is_note_locked_was
-      if is_note_locked
-        ModAction.log("locked notes for post ##{id}", :post_note_lock_create)
-      else
-        ModAction.log("unlocked notes for post ##{id}", :post_note_lock_delete)
-      end
-    end
-
-    if is_rating_locked != is_rating_locked_was
-      if is_rating_locked
-        ModAction.log("locked rating for post ##{id}", :post_rating_lock_create)
-      else
-        ModAction.log("unlocked rating for post ##{id}", :post_rating_lock_delete)
-      end
-    end
-
-    if is_status_locked != is_status_locked_was
-      if is_status_locked
-        ModAction.log("locked status for post ##{id}", :post_status_lock_create)
-      else
-        ModAction.log("unlocked status for post ##{id}", :post_status_lock_delete)
-      end
-    end
-  end
-
   def self.model_restriction(table)
     super.where(table[:is_pending].eq(false)).where(table[:is_flagged].eq(false)).where(table[:is_deleted].eq(false))
   end
 
   def self.available_includes
     # attributes accessible through the ?only= parameter
-    [:uploader, :updater, :approver, :upload, :flags, :appeals,
-     :parent, :children, :notes, :comments, :approvals, :disapprovals,
-     :replacements, :pixiv_ugoira_frame_data, :artist_commentary]
+    %i[
+      uploader updater approver upload flags appeals parent children notes
+      comments approvals disapprovals replacements pixiv_ugoira_frame_data
+      artist_commentary
+    ]
   end
 end

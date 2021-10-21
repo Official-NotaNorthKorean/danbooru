@@ -1,5 +1,4 @@
 class User < ApplicationRecord
-  class Error < StandardError; end
   class PrivilegeError < StandardError; end
 
   module Levels
@@ -138,7 +137,7 @@ class User < ApplicationRecord
   has_many :forum_posts, -> {order("forum_posts.created_at, forum_posts.id")}, :foreign_key => "creator_id"
   has_many :user_name_change_requests, -> {order("user_name_change_requests.created_at desc")}
   has_many :favorite_groups, -> {order(name: :asc)}, foreign_key: :creator_id
-  has_many :favorites, ->(rec) {where("user_id % 100 = #{rec.id % 100} and user_id = #{rec.id}").order("id desc")}
+  has_many :favorites
   has_many :ip_bans, foreign_key: :creator_id
   has_many :tag_aliases, foreign_key: :creator_id
   has_many :tag_implications, foreign_key: :creator_id
@@ -436,16 +435,6 @@ class User < ApplicationRecord
         end
       end
 
-      def favorite_limit(level)
-        if level >= User::Levels::PLATINUM
-          Float::INFINITY
-        elsif level == User::Levels::GOLD
-          20_000
-        else
-          10_000
-        end
-      end
-
       def favorite_group_limit(level)
         if level >= User::Levels::BUILDER
           Float::INFINITY
@@ -512,10 +501,6 @@ class User < ApplicationRecord
 
     def tag_query_limit
       User.tag_query_limit(level)
-    end
-
-    def favorite_limit
-      User.favorite_limit(level)
     end
 
     def favorite_group_limit

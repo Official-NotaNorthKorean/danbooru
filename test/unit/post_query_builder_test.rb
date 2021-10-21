@@ -1,8 +1,8 @@
 require 'test_helper'
 
 class PostQueryBuilderTest < ActiveSupport::TestCase
-  def assert_tag_match(posts, query)
-    assert_equal(posts.map(&:id), Post.user_tag_match(query).pluck(:id))
+  def assert_tag_match(posts, query, **options)
+    assert_equal(posts.map(&:id), Post.user_tag_match(query, CurrentUser.user, **options).pluck(:id))
   end
 
   def assert_fast_count(count, query, query_options = {}, fast_count_options = {})
@@ -142,6 +142,20 @@ class PostQueryBuilderTest < ActiveSupport::TestCase
       assert_tag_match([post3], "~bbb -a*")
       assert_tag_match([post1], "a* -*b")
       assert_tag_match([post2], "-*c -a*a")
+    end
+
+    should "return posts for a complex search with multiple AND, OR, and NOT tags" do
+      post1 = create(:post, tag_string: "original")
+      post2 = create(:post, tag_string: "smile")
+      post3 = create(:post, tag_string: "original smile")
+      post4 = create(:post, tag_string: "original smile 1girl")
+      post5 = create(:post, tag_string: "original smile 1girl 1boy")
+      post6 = create(:post, tag_string: "original smile 1girl multiple_boys")
+      post7 = create(:post, tag_string: "original smile multiple_girls")
+      post8 = create(:post, tag_string: "original smile multiple_girls 1boy")
+      post9 = create(:post, tag_string: "original smile multiple_girls multiple_boys")
+
+      assert_tag_match([post7, post4], "original smile ~1girl ~multiple_girls -1boy -multiple_boys", tag_limit: 100)
     end
 
     should "ignore invalid operator syntax" do
@@ -593,6 +607,15 @@ class PostQueryBuilderTest < ActiveSupport::TestCase
       assert_tag_match([], "-ratio:2.0")
     end
 
+    should "return posts for the duration:<x> metatag" do
+      post = create(:post, media_asset: create(:media_asset, file: "test/files/test-512x512.webm"))
+
+      assert_tag_match([post], "duration:0.48")
+      assert_tag_match([post], "duration:>0.4")
+      assert_tag_match([post], "duration:<0.5")
+      assert_tag_match([], "duration:>1")
+    end
+
     should "return posts for the status:<type> metatag" do
       pending = create(:post, is_pending: true)
       flagged = create(:post, is_flagged: true)
@@ -836,28 +859,6 @@ class PostQueryBuilderTest < ActiveSupport::TestCase
       assert_tag_match(all - [e], "-rating:e")
     end
 
-    should "return posts for a locked:<rating|note|status> metatag" do
-      rating_locked = create(:post, is_rating_locked: true)
-      note_locked   = create(:post, is_note_locked: true)
-      status_locked = create(:post, is_status_locked: true)
-      all = [status_locked, note_locked, rating_locked]
-
-      assert_tag_match([rating_locked], "locked:rating")
-      assert_tag_match([note_locked], "locked:note")
-      assert_tag_match([status_locked], "locked:status")
-
-      assert_tag_match(all - [rating_locked], "-locked:rating")
-      assert_tag_match(all - [note_locked], "-locked:note")
-      assert_tag_match(all - [status_locked], "-locked:status")
-
-      assert_tag_match([rating_locked], "locked:RATING")
-      assert_tag_match([status_locked], "-locked:rating -locked:note")
-      assert_tag_match([], "locked:rating locked:note")
-
-      assert_tag_match([], "locked:garbage")
-      assert_tag_match(all, "-locked:garbage")
-    end
-
     should "return posts for a upvote:<user>, downvote:<user> metatag" do
       CurrentUser.scoped(create(:mod_user)) do
         upvoted   = create(:post, tag_string: "upvote:self")
@@ -963,6 +964,7 @@ class PostQueryBuilderTest < ActiveSupport::TestCase
       assert_tag_match(posts.reverse, "order:notes_desc")
       assert_tag_match(posts.reverse, "order:md5")
       assert_tag_match(posts.reverse, "order:md5_desc")
+      assert_tag_match(posts.reverse, "order:duration_desc")
 
       assert_tag_match(posts, "order:id_asc")
       assert_tag_match(posts, "order:score_asc")
@@ -983,6 +985,7 @@ class PostQueryBuilderTest < ActiveSupport::TestCase
       assert_tag_match(posts, "order:note_count_asc")
       assert_tag_match(posts, "order:notes_asc")
       assert_tag_match(posts, "order:md5_asc")
+      assert_tag_match(posts, "order:duration_asc")
 
       # ordering is unpredictable so can't be tested.
       assert_tag_match([posts.first], "id:#{posts.first.id} order:none")
@@ -1196,29 +1199,49 @@ class PostQueryBuilderTest < ActiveSupport::TestCase
     context "for a single metatag" do
       should "return the correct cached count" do
         build(:tag, name: "score:42", post_count: -100).save(validate: false)
-        PostQueryBuilder.new("score:42").set_cached_count(100)
+        Cache.put("pfc:score:42", 100)
         assert_fast_count(100, "score:42")
       end
 
       should "return the correct cached count for a pool:<id> search" do
-        build(:tag, name: "pool:1234", post_count: -100).save(validate: false)
-        PostQueryBuilder.new("pool:1234").set_cached_count(100)
-        assert_fast_count(100, "pool:1234")
+        pool = create(:pool, post_ids: [1, 2, 3])
+
+        build(:tag, name: "pool:#{pool.id}", post_count: -100).save(validate: false)
+        Cache.put("pfc:pool:1234", 100)
+
+        assert_fast_count(3, "pool:#{pool.id}")
+        assert_fast_count(3, "pool:#{pool.name}")
+      end
+
+      should "return the correct favorite count for a fav:<name> search" do
+        fav = create(:favorite)
+        fav.user.update!(favorite_count: 1)
+
+        assert_fast_count(1, "fav:#{fav.user.name}")
+        assert_fast_count(1, "ordfav:#{fav.user.name}")
+      end
+
+      should "return the correct favorite count for a fav:<name> search for a user with private favorites" do
+        fav = create(:favorite)
+        fav.user.update!(favorite_count: 1, enable_private_favorites: true)
+
+        assert_fast_count(0, "fav:#{fav.user.name}")
+        assert_fast_count(0, "ordfav:#{fav.user.name}")
+      end
+
+      should "return the correct favorite count for a fav:<name> search for a nonexistent user" do
+        assert_fast_count(0, "fav:doesnotexist")
+        assert_fast_count(0, "ordfav:doesnotexist")
       end
     end
 
     context "for a multi-tag search" do
       should "return the cached count, if it exists" do
-        PostQueryBuilder.new("score:42 aaa").set_cached_count(100)
+        Cache.put("pfc:score:42 aaa", 100)
         assert_fast_count(100, "aaa score:42")
       end
 
       should "return the true count, if not cached" do
-        assert_fast_count(1, "aaa score:42")
-      end
-
-      should "set the expiration time" do
-        Cache.expects(:put).with(PostQueryBuilder.new("score:42 aaa").count_cache_key, 1, 180)
         assert_fast_count(1, "aaa score:42")
       end
 

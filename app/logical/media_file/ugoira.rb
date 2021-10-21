@@ -7,7 +7,7 @@
 # zip file, so it must be passed around separately.
 class MediaFile::Ugoira < MediaFile
   class Error < StandardError; end
-  attr_reader :frame_data
+  attr_accessor :frame_data
 
   def initialize(file, frame_data: {}, **options)
     super(file, **options)
@@ -30,6 +30,22 @@ class MediaFile::Ugoira < MediaFile
 
   def crop(width, height)
     preview_frame.crop(width, height)
+  end
+
+  def duration
+    (frame_delays.sum / 1000.0)
+  end
+
+  def frame_count
+    frame_data.count
+  end
+
+  def frame_rate
+    frame_count / duration
+  end
+
+  def frame_delays
+    frame_data.map { |frame| frame["delay"] }
   end
 
   # Convert a ugoira to a webm.

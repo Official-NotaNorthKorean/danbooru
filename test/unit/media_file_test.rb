@@ -166,6 +166,12 @@ class MediaFileTest < ActiveSupport::TestCase
       assert_equal([150, 150], @ugoira.crop(150, 150).dimensions)
     end
 
+    should "get the duration" do
+      assert_equal(1.05, @ugoira.duration)
+      assert_equal(4.76, @ugoira.frame_rate.round(2))
+      assert_equal(5, @ugoira.frame_count)
+    end
+
     should "convert to a webm" do
       webm = @ugoira.convert
       assert_equal(:webm, webm.file_ext)
@@ -173,10 +179,31 @@ class MediaFileTest < ActiveSupport::TestCase
     end
   end
 
-  context "for a video" do
+  context "for an mp4 file " do
     should "detect videos with audio" do
       assert_equal(true, MediaFile.open("test/files/test-audio.mp4").has_audio?)
       assert_equal(false, MediaFile.open("test/files/test-300x300.mp4").has_audio?)
+    end
+
+    should "determine the duration of the video" do
+      file = MediaFile.open("test/files/test-audio.mp4")
+      assert_equal(1.002667, file.duration)
+      assert_equal(10/1.002667, file.frame_rate)
+      assert_equal(10, file.frame_count)
+
+      file = MediaFile.open("test/files/test-300x300.mp4")
+      assert_equal(5.7, file.duration)
+      assert_equal(1.75, file.frame_rate.round(2))
+      assert_equal(10, file.frame_count)
+    end
+  end
+
+  context "for a webm file" do
+    should "determine the duration of the video" do
+      file = MediaFile.open("test/files/test-512x512.webm")
+      assert_equal(0.48, file.duration)
+      assert_equal(10/0.48, file.frame_rate)
+      assert_equal(10, file.frame_count)
     end
   end
 
@@ -187,6 +214,90 @@ class MediaFileTest < ActiveSupport::TestCase
       assert_equal(true, @metadata["Flash:Compressed"])
       assert_not_equal("Install Compress::Zlib to extract compressed information", @metadata["ExifTool:Warning"])
       assert_equal(6, @metadata.count)
+    end
+  end
+
+  context "an animated GIF file" do
+    should "determine the duration of the animation" do
+      file = MediaFile.open("test/files/test-animated-86x52.gif")
+      assert_equal(0.4, file.duration)
+      assert_equal(10, file.frame_rate)
+      assert_equal(4, file.frame_count)
+    end
+  end
+
+  context "a PNG file" do
+    context "that is not animated" do
+      should "not be detected as animated" do
+        file = MediaFile.open("test/files/apng/not_apng.png")
+
+        assert_equal(false, file.is_corrupt?)
+        assert_equal(false, file.is_animated?)
+        assert_nil(file.duration)
+        assert_nil(file.frame_rate)
+        assert_equal(1, file.frame_count)
+      end
+    end
+
+    context "that is animated" do
+      should "be detected as animated" do
+        file = MediaFile.open("test/files/apng/normal_apng.png")
+
+        assert_equal(false, file.is_corrupt?)
+        assert_equal(true, file.is_animated?)
+        assert_equal(3.0, file.duration)
+        assert_equal(1.0, file.frame_rate)
+        assert_equal(3, file.frame_count)
+      end
+    end
+
+    context "that is animated but with only one frame" do
+      should "not be detected as animated" do
+        file = MediaFile.open("test/files/apng/single_frame.png")
+
+        assert_equal(false, file.is_corrupt?)
+        assert_equal(false, file.is_animated?)
+        assert_nil(file.duration)
+        assert_nil(file.frame_rate)
+        assert_equal(1, file.frame_count)
+      end
+    end
+
+    context "that is animated but with an unspecified frame rate" do
+      should "have an assumed frame rate of ~6.66 FPS" do
+        file = MediaFile.open("test/files/test-animated-inf-fps.png")
+
+        assert_equal(false, file.is_corrupt?)
+        assert_equal(true, file.is_animated?)
+        assert_equal(0.3, file.duration)
+        assert_equal(2, file.frame_count)
+        assert_equal(2/0.3, file.frame_rate)
+      end
+    end
+
+    context "that is animated but malformed" do
+      should "be handled correctly" do
+        file = MediaFile.open("test/files/apng/iend_missing.png")
+        assert_equal(false, file.is_corrupt?)
+        assert_equal(true, file.is_animated?)
+
+        file = MediaFile.open("test/files/apng/misaligned_chunks.png")
+        assert_equal(true, file.is_corrupt?)
+        assert_equal(true, file.is_animated?)
+
+        file = MediaFile.open("test/files/apng/broken.png")
+        assert_equal(true, file.is_corrupt?)
+        assert_equal(true, file.is_animated?)
+
+        file = MediaFile.open("test/files/apng/actl_wronglen.png")
+        assert_equal(false, file.is_corrupt?)
+        assert_equal(true, file.is_animated?)
+
+        file = MediaFile.open("test/files/apng/actl_zero_frames.png")
+        assert_equal(false, file.is_corrupt?)
+        assert_equal(false, file.is_animated?)
+        assert_equal(0, file.frame_count)
+      end
     end
   end
 
@@ -268,6 +379,54 @@ class MediaFileTest < ActiveSupport::TestCase
       assert_equal(3, @preview.channels)
       assert_equal(:srgb, @preview.colorspace)
       assert_equal([120, 150], @preview.dimensions)
+    end
+  end
+
+  context "an image that is rotated 90 degrees clockwise" do
+    should "have the correct dimensions" do
+      @file = MediaFile.open("test/files/test-rotation-90cw.jpg")
+      assert_equal([96, 128], @file.dimensions)
+    end
+
+    should "generate a rotated thumbnail" do
+      @file = MediaFile.open("test/files/test-rotation-90cw.jpg")
+      assert_equal([48, 64], @file.preview(64, 64).dimensions)
+    end
+  end
+
+  context "an image that is rotated 270 degrees clockwise" do
+    should "have the correct dimensions" do
+      @file = MediaFile.open("test/files/test-rotation-270cw.jpg")
+      assert_equal([100, 66], @file.dimensions)
+    end
+
+    should "generate a rotated thumbnail" do
+      @file = MediaFile.open("test/files/test-rotation-270cw.jpg")
+      assert_equal([50, 33], @file.preview(50, 50).dimensions)
+    end
+  end
+
+  context "an image that is rotated 180 degrees" do
+    should "have the correct dimensions" do
+      @file = MediaFile.open("test/files/test-rotation-180.jpg")
+      assert_equal([66, 100], @file.dimensions)
+    end
+
+    should "generate a rotated thumbnail" do
+      @file = MediaFile.open("test/files/test-rotation-180.jpg")
+      assert_equal([33, 50], @file.preview(50, 50).dimensions)
+    end
+  end
+
+  context "a PNG with an exif orientation flag" do
+    should "not generate rotated dimensions" do
+      @file = MediaFile.open("test/files/test-rotation-90cw.png")
+      assert_equal([128, 96], @file.dimensions)
+    end
+
+    should "not generate a rotated thumbnail" do
+      @file = MediaFile.open("test/files/test-rotation-90cw.png")
+      assert_equal([64, 48], @file.preview(64, 64).dimensions)
     end
   end
 end

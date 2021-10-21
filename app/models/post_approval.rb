@@ -8,10 +8,6 @@ class PostApproval < ApplicationRecord
   def validate_approval
     post.lock!
 
-    if post.is_status_locked?
-      errors.add(:post, "is locked and cannot be approved")
-    end
-
     if post.is_active?
       errors.add(:post, "is already active and cannot be approved")
     end
@@ -33,7 +29,7 @@ class PostApproval < ApplicationRecord
     post.appeals.pending.update!(status: :succeeded)
 
     post.update(approver: user, is_flagged: false, is_pending: false, is_deleted: false)
-    ModAction.log("undeleted post ##{post_id}", :post_undelete) if is_undeletion
+    ModAction.log("undeleted post ##{post_id}", :post_undelete, user) if is_undeletion
 
     post.uploader.upload_limit.update_limit!(is_pending, true)
   end

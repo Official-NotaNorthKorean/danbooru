@@ -13,24 +13,19 @@ class Note < ApplicationRecord
   validate :note_within_image
   after_save :update_post
   after_save :create_version
-  validate :validate_post_is_not_locked
 
   scope :active, -> { where(is_active: true) }
 
   module SearchMethods
     def search(params)
       q = search_attributes(params, :id, :created_at, :updated_at, :is_active, :x, :y, :width, :height, :body, :version, :post)
-      q = q.text_attribute_matches(:body, params[:body_matches], index_column: :body_index)
+      q = q.text_attribute_matches(:body, params[:body_matches])
 
       q.apply_default_order(params)
     end
   end
 
   extend SearchMethods
-
-  def validate_post_is_not_locked
-    errors.add(:post, "is note locked") if post.is_note_locked?
-  end
 
   def note_within_image
     return false unless post.present?
@@ -48,7 +43,7 @@ class Note < ApplicationRecord
   end
 
   def update_post
-    if self.saved_changes?
+    if saved_changes?
       if post.notes.active.exists?
         post.update_columns(last_noted_at: updated_at)
       else

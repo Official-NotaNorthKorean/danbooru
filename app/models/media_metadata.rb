@@ -16,11 +16,14 @@ class MediaMetadata < ApplicationRecord
 
   def self.search(params)
     q = search_attributes(params, :id, :created_at, :updated_at, :media_asset, :metadata)
-    q = q.apply_default_order(params)
-    q
+    q.apply_default_order(params)
   end
 
   def file=(file_or_path)
     self.metadata = MediaFile.open(file_or_path).metadata
+  end
+
+  def metadata
+    ExifTool::Metadata.new(self[:metadata])
   end
 end
